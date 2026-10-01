@@ -97,32 +97,31 @@ wss.on('connection', (plivoWs) => {
         console.log(`[WS] Call started | UUID: ${callUUID}`);
         console.log(`[WS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
-        // Create STT — only after call is confirmed to avoid wasted connections
-        sttWs = createSarvamSTT(SARVAM_KEY, LANG, (transcript, isFinal) => {
-          console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'}: "${transcript}"`);
-          if (isFinal && transcript.trim().length > 0) {
-            const session = sessions.get(sessionId);
-            if (session?.ttsWs) session.ttsWs.synthesize(transcript);
-          }
-        });
+        // --- SARVAM STT/TTS BYPASSED FOR TESTING ---
+        // sttWs = createSarvamSTT(SARVAM_KEY, LANG, (transcript, isFinal) => {
+        //   console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'}: "${transcript}"`);
+        //   if (isFinal && transcript.trim().length > 0) {
+        //     const session = sessions.get(sessionId);
+        //     if (session?.ttsWs) session.ttsWs.synthesize(transcript);
+        //   }
+        // });
+        //
+        // ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
+        //   const session = sessions.get(sessionId);
+        //   if (!session || !session.customerWs || session.customerWs.readyState !== 1) return;
+        //   try {
+        //     const mulawBuf = pcm16kToMulaw(pcmBuffer);
+        //     session.customerWs.send(JSON.stringify({
+        //       event: 'playAudio',
+        //       media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload: mulawBuf.toString('base64') },
+        //     }));
+        //     console.log(`[TTS] Sent modulated audio to CustomerWS (callId: ${sessionId})`);
+        //   } catch (err) {
+        //     console.error('[TTS→Plivo] Error:', err.message);
+        //   }
+        // });
 
-        // Create TTS — only after call is confirmed
-        ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
-          const session = sessions.get(sessionId);
-          if (!session || !session.customerWs || session.customerWs.readyState !== 1) return;
-          try {
-            const mulawBuf = pcm16kToMulaw(pcmBuffer);
-            session.customerWs.send(JSON.stringify({
-              event: 'playAudio',
-              media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload: mulawBuf.toString('base64') },
-            }));
-            console.log(`[TTS] Sent modulated audio to CustomerWS (callId: ${sessionId})`);
-          } catch (err) {
-            console.error('[TTS→Plivo] Error:', err.message);
-          }
-        });
-
-        sessions.set(sessionId, { customerWs: plivoWs, sttWs, ttsWs });
+        sessions.set(sessionId, { customerWs: plivoWs, sttWs: null, ttsWs: null });
 
         // Dial the agent once
         try {
@@ -195,10 +194,19 @@ agentWss.on('connection', (agentWs, req) => {
     else if (msg.event === 'media') {
       const { track, payload } = msg.media || {};
       if (!payload) return;
-      // 'inbound' = agent's voice → send to Sarvam STT
-      if (track === 'inbound' && session && session.sttWs && session.sttWs.readyState === 1) {
-        session.sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
-        if (Math.random() < 0.05) console.log(`[Router] Routed agent audio to STT (callId: ${sessionId})`);
+      // 'inbound' = agent's voice → send directly to customer
+      // --- SARVAM ROUTING COMMENTED OUT ---
+      // if (track === 'inbound' && session && session.sttWs && session.sttWs.readyState === 1) {
+      //   session.sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
+      //   if (Math.random() < 0.05) console.log(`[Router] Routed agent audio to STT (callId: ${sessionId})`);
+      // }
+      
+      if (track === 'inbound' && session && session.customerWs && session.customerWs.readyState === 1) {
+        session.customerWs.send(JSON.stringify({
+          event: 'playAudio',
+          media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
+        }));
+        if (Math.random() < 0.05) console.log(`[Router] Routed raw agent audio directly to CustomerWS (callId: ${sessionId})`);
       }
     }
   });
