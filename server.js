@@ -1,7 +1,10 @@
 // server.js — Voice Modulation Server
 // Bridges Plivo WebSocket streaming with Sarvam STT + TTS
-// to convert the agent's voice to female before sending to the customer.
+// to convert the agent's voice to Sarvam Priya before sending to the customer.
 //
+// Flow:
+//   Customer  ──inbound──► /stream   ──────────────────────────────► AgentWS  (raw, no mod)
+//   AgentWS   ──inbound──► /agent-stream → STT → transcript → TTS → CustomerWS  (Priya voice)
 
 require("dotenv").config();
 
@@ -12,29 +15,23 @@ const { WebSocketServer } = require("ws");
 const { dialAgent } = require("./plivoClient");
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
-const { mulawToPcm16k, pcm16kToMulaw, pitchShiftMulaw } = require("./audioUtils");
+const { mulawToPcm16k, pcm16kToMulaw } = require("./audioUtils");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT = process.env.PORT || 8080;
+const PORT    = process.env.PORT || 8080;
 const SARVAM_KEY = process.env.SARVAM_API_KEY;
 const SPEAKER = process.env.SARVAM_FEMALE_SPEAKER || "priya";
-const LANG = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
-
-// Pitch shift ratio for agent → customer voice modulation.
-// +7 semitones ≈ 2^(7/12) ≈ 1.498 — clearly female.
-// Override with PITCH_SEMITONES env var (e.g. PITCH_SEMITONES=5 for subtle).
-const _semitones = parseFloat(process.env.PITCH_SEMITONES || "7");
-const PITCH_RATIO = Math.pow(2, _semitones / 12);
+const LANG    = process.env.SARVAM_LANGUAGE_CODE   || "hi-IN";
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
 
 // Use noServer:true + manual upgrade routing to avoid ws upgrade event
 // conflicts when multiple WebSocketServer instances share the same HTTP server.
-const wss = new WebSocketServer({ noServer: true });
+const wss      = new WebSocketServer({ noServer: true });
 const agentWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
@@ -84,16 +81,15 @@ app.post("/api/plivo/agent-answer", (req, res) => {
 });
 
 // ─── Customer WebSocket Handler (/stream) ─────────────────────────────────────
+// Handles the incoming call from the customer's phone.
 
 const sessions = new Map();
 
 wss.on("connection", (plivoWs) => {
   console.log("\n[WS] ─── New Plivo connection ─────────────────────");
 
-  let callUUID = null;
+  let callUUID  = null;
   let sessionId = null;
-  let sttWs = null;
-  let ttsWs = null;
 
   plivoWs.on("message", async (raw) => {
     let msg;
@@ -115,34 +111,13 @@ wss.on("connection", (plivoWs) => {
         console.log(`[WS] Call started | UUID: ${callUUID}`);
         console.log(`[WS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
-        // --- SARVAM STT/TTS BYPASSED FOR TESTING ---
-        // sttWs = createSarvamSTT(SARVAM_KEY, LANG, (transcript, isFinal) => {
-        //   console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'}: "${transcript}"`);
-        //   if (isFinal && transcript.trim().length > 0) {
-        //     const session = sessions.get(sessionId);
-        //     if (session?.ttsWs) session.ttsWs.synthesize(transcript);
-        //   }
-        // });
-        //
-        // ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
-        //   const session = sessions.get(sessionId);
-        //   if (!session || !session.customerWs || session.customerWs.readyState !== 1) return;
-        //   try {
-        //     const mulawBuf = pcm16kToMulaw(pcmBuffer);
-        //     session.customerWs.send(JSON.stringify({
-        //       event: 'playAudio',
-        //       media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload: mulawBuf.toString('base64') },
-        //     }));
-        //     console.log(`[TTS] Sent modulated audio to CustomerWS (callId: ${sessionId})`);
-        //   } catch (err) {
-        //     console.error('[TTS→Plivo] Error:', err.message);
-        //   }
-        // });
-
+        // Register the session. agentWs / sttWs / ttsWs will be filled in
+        // later when the agent leg connects (/agent-stream).
         sessions.set(sessionId, {
           customerWs: plivoWs,
-          sttWs: null,
-          ttsWs: null,
+          agentWs:    null,
+          sttWs:      null,
+          ttsWs:      null,
         });
 
         // Dial the agent once
@@ -155,10 +130,11 @@ wss.on("connection", (plivoWs) => {
       }
 
       // ── media ─────────────────────────────────────────────────────────────
+      // Customer audio → forward raw (unmodified) to agent so they can hear.
       case "media": {
         const { track, payload } = msg.media || {};
         if (!payload) break;
-        // Send customer audio to the agent so they can hear
+
         if (track === "inbound") {
           const session = sessions.get(sessionId);
           if (session && session.agentWs && session.agentWs.readyState === 1) {
@@ -174,7 +150,7 @@ wss.on("connection", (plivoWs) => {
             );
             if (Math.random() < 0.05)
               console.log(
-                `[Router] Routed customer audio to AgentWS (callId: ${sessionId})`,
+                `[Router] Routed customer audio → AgentWS (callId: ${sessionId})`,
               );
           }
         }
@@ -184,7 +160,7 @@ wss.on("connection", (plivoWs) => {
       // ── stop ──────────────────────────────────────────────────────────────
       case "stop": {
         console.log(`[WS] Call stopped | UUID: ${callUUID}`);
-        cleanup(sessionId, sttWs, ttsWs);
+        cleanupSession(sessionId);
         break;
       }
     }
@@ -192,29 +168,82 @@ wss.on("connection", (plivoWs) => {
 
   plivoWs.on("close", (code) => {
     console.log(`[WS] Connection closed (code=${code}) | UUID: ${callUUID}`);
-    cleanup(sessionId, sttWs, ttsWs);
+    cleanupSession(sessionId);
   });
 
   plivoWs.on("error", (err) => console.error("[WS] Error:", err.message));
 });
 
 // ─── Agent WebSocket Handler (/agent-stream) ──────────────────────────────────
-// Handles agent's phone audio. Does NOT call dialAgent() — prevents the loop.
+// Handles the agent's phone audio.
+// Agent inbound audio ──► Sarvam STT ──► transcript ──► Sarvam TTS (Priya) ──► customer
+// Does NOT call dialAgent() — that would cause an infinite loop.
 
 agentWss.on("connection", (agentWs, req) => {
   console.log("[AgentWS] ─── Agent leg connected ──────────────────");
 
-  const url = new URL(req.url, "http://localhost");
+  const url       = new URL(req.url, "http://localhost");
   const sessionId = url.searchParams.get("sessionId");
-  let session = sessions.get(sessionId);
+  const session   = sessions.get(sessionId);
 
-  if (session) {
-    session.agentWs = agentWs;
-    console.log(`[AgentWS] Linked to session ${sessionId}`);
-  } else {
-    console.warn(`[AgentWS] No active session found for ${sessionId}`);
+  if (!session) {
+    console.warn(`[AgentWS] No active session found for ${sessionId} — closing`);
+    agentWs.close();
+    return;
   }
 
+  session.agentWs = agentWs;
+  console.log(`[AgentWS] Linked to session ${sessionId}`);
+
+  // ── Initialise Sarvam TTS (Priya) ─────────────────────────────────────────
+  // Create TTS first so it's ready when STT produces transcripts.
+  const ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
+    // TTS gives us PCM16 @ 16kHz — convert to μ-law @ 8kHz for Plivo.
+    const currentSession = sessions.get(sessionId);
+    if (
+      !currentSession ||
+      !currentSession.customerWs ||
+      currentSession.customerWs.readyState !== 1
+    ) return;
+
+    try {
+      const mulawBuf = pcm16kToMulaw(pcmBuffer);
+      currentSession.customerWs.send(
+        JSON.stringify({
+          event: "playAudio",
+          media: {
+            contentType: "audio/x-mulaw",
+            sampleRate: 8000,
+            payload: mulawBuf.toString("base64"),
+          },
+        }),
+      );
+      if (Math.random() < 0.05)
+        console.log(`[TTS→Customer] Sent Priya audio to customer (callId: ${sessionId})`);
+    } catch (err) {
+      console.error("[TTS→Plivo] Error:", err.message);
+    }
+  });
+
+  session.ttsWs = ttsWs;
+
+  // ── Initialise Sarvam STT ──────────────────────────────────────────────────
+  // STT receives agent PCM audio and fires onTranscript on each recognised phrase.
+  const sttWs = createSarvamSTT(SARVAM_KEY, LANG, (transcript, isFinal) => {
+    console.log(`[STT] ${isFinal ? "FINAL" : "partial"}: "${transcript}"`);
+    if (isFinal && transcript.trim().length > 0) {
+      const currentSession = sessions.get(sessionId);
+      if (currentSession?.ttsWs?.readyState === 1) {
+        currentSession.ttsWs.synthesize(transcript);
+      } else {
+        console.warn("[STT→TTS] TTS not ready, dropping transcript");
+      }
+    }
+  });
+
+  session.sttWs = sttWs;
+
+  // ── Agent media messages ───────────────────────────────────────────────────
   agentWs.on("message", (raw) => {
     let msg;
     try {
@@ -232,53 +261,57 @@ agentWss.on("connection", (agentWs, req) => {
       const { track, payload } = msg.media || {};
       if (!payload) return;
 
-      // 'inbound' = agent's voice → pitch-shift → customer
-      // Customer audio ('outbound') flows the other direction and is NOT touched here.
-      if (
-        track === "inbound" &&
-        session &&
-        session.customerWs &&
-        session.customerWs.readyState === 1
-      ) {
-        let shiftedPayload;
-        try {
-          shiftedPayload = pitchShiftMulaw(payload, PITCH_RATIO);
-        } catch (err) {
-          console.error("[PitchShift] Error:", err.message);
-          shiftedPayload = payload; // fallback: send original on error
+      // 'inbound' = audio coming FROM the agent's phone (what the agent speaks).
+      // Send raw PCM to STT so we can recognise and re-speak in Priya's voice.
+      if (track === "inbound") {
+        const currentSession = sessions.get(sessionId);
+        if (currentSession?.sttWs?.readyState === 1) {
+          try {
+            const pcmBuf = mulawToPcm16k(Buffer.from(payload, "base64"));
+            currentSession.sttWs.send(pcmBuf); // binary frame — Sarvam expects raw PCM
+            if (Math.random() < 0.05)
+              console.log(`[Agent→STT] Routed agent audio to Sarvam STT (callId: ${sessionId})`);
+          } catch (err) {
+            console.error("[Agent→STT] Conversion error:", err.message);
+          }
         }
-
-        session.customerWs.send(
-          JSON.stringify({
-            event: "playAudio",
-            media: { contentType: "audio/x-mulaw", sampleRate: 8000, payload: shiftedPayload },
-          }),
-        );
-        if (Math.random() < 0.05)
-          console.log(
-            `[Router] Routed PITCH-SHIFTED agent audio to CustomerWS (ratio=${PITCH_RATIO.toFixed(3)}, callId: ${sessionId})`,
-          );
       }
     }
   });
 
   agentWs.on("close", (code) => {
     console.log(`[AgentWS] Closed (code=${code})`);
+    // Close Sarvam connections tied to this agent leg
+    cleanupSarvam(sessionId);
     if (session) session.agentWs = null;
   });
+
   agentWs.on("error", (err) => console.error("[AgentWS] Error:", err.message));
 });
 
-// ─── Cleanup ─────────────────────────────────────────────────────────────────
+// ─── Cleanup Helpers ──────────────────────────────────────────────────────────
 
-function cleanup(sessionId, sttWs, ttsWs) {
-  if (sessionId) sessions.delete(sessionId);
-  try {
-    sttWs?.close();
-  } catch {}
-  try {
-    ttsWs?.close();
-  } catch {}
+/**
+ * Close Sarvam STT + TTS connections for a session without deleting the session.
+ * Called when the agent leg drops (customer may still be on hold).
+ */
+function cleanupSarvam(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  try { session.sttWs?.close(); } catch {}
+  try { session.ttsWs?.close(); } catch {}
+  session.sttWs = null;
+  session.ttsWs = null;
+}
+
+/**
+ * Full session teardown. Called when the customer call ends.
+ */
+function cleanupSession(sessionId) {
+  if (!sessionId) return;
+  cleanupSarvam(sessionId);
+  sessions.delete(sessionId);
+  console.log(`[Cleanup] Session ${sessionId} removed`);
 }
 
 // ─── Start ───────────────────────────────────────────────────────────────────
