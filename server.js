@@ -20,10 +20,11 @@ const { mulawToPcm16k, pcm24kToMulaw } = require("./audioUtils");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT    = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080;
 const SARVAM_KEY = process.env.SARVAM_API_KEY;
-const SPEAKER = process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
-const LANG    = process.env.SARVAM_LANGUAGE_CODE   || "hi-IN";
+const SPEAKER =
+  process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
+const LANG = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
 
 // ─── Audio Streamer (Jitter Buffer) ──────────────────────────────────────────
 // Plivo prefers steady chunks of audio rather than large burst payloads.
@@ -61,17 +62,19 @@ class AudioStreamer {
 
   sendChunk(chunk) {
     if (this.ws.readyState === 1) {
-      this.ws.send(JSON.stringify({
-        event: "playAudio",
-        media: {
-          contentType: "audio/x-mulaw",
-          sampleRate: 8000,
-          payload: chunk.toString("base64"),
-        },
-      }));
+      this.ws.send(
+        JSON.stringify({
+          event: "playAudio",
+          media: {
+            contentType: "audio/x-mulaw",
+            sampleRate: 8000,
+            payload: chunk.toString("base64"),
+          },
+        }),
+      );
     }
   }
-  
+
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -81,12 +84,12 @@ class AudioStreamer {
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 
 // Use noServer:true + manual upgrade routing to avoid ws upgrade event
 // conflicts when multiple WebSocketServer instances share the same HTTP server.
-const wss      = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true });
 const agentWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
@@ -143,7 +146,7 @@ const sessions = new Map();
 wss.on("connection", (plivoWs) => {
   console.log("\n[WS] ─── New Plivo connection ─────────────────────");
 
-  let callUUID  = null;
+  let callUUID = null;
   let sessionId = null;
 
   plivoWs.on("message", async (raw) => {
@@ -170,10 +173,10 @@ wss.on("connection", (plivoWs) => {
         // later when the agent leg connects (/agent-stream).
         sessions.set(sessionId, {
           customerWs: plivoWs,
-          agentWs:    null,
-          sttWs:      null,
-          ttsWs:      null,
-          streamer:   new AudioStreamer(plivoWs, sessionId),
+          agentWs: null,
+          sttWs: null,
+          ttsWs: null,
+          streamer: new AudioStreamer(plivoWs, sessionId),
         });
 
         // Dial the agent once
@@ -238,12 +241,14 @@ wss.on("connection", (plivoWs) => {
 agentWss.on("connection", (agentWs, req) => {
   console.log("[AgentWS] ─── Agent leg connected ──────────────────");
 
-  const url       = new URL(req.url, "http://localhost");
+  const url = new URL(req.url, "http://localhost");
   const sessionId = url.searchParams.get("sessionId");
-  const session   = sessions.get(sessionId);
+  const session = sessions.get(sessionId);
 
   if (!session) {
-    console.warn(`[AgentWS] No active session found for ${sessionId} — closing`);
+    console.warn(
+      `[AgentWS] No active session found for ${sessionId} — closing`,
+    );
     agentWs.close();
     return;
   }
@@ -261,7 +266,8 @@ agentWss.on("connection", (agentWs, req) => {
       !currentSession ||
       !currentSession.customerWs ||
       currentSession.customerWs.readyState !== 1
-    ) return;
+    )
+      return;
 
     try {
       // Resample 24000Hz PCM to 8000Hz mu-law locally
@@ -269,9 +275,11 @@ agentWss.on("connection", (agentWs, req) => {
 
       // Queue the resampled mu-law directly into the streamer to avoid bursting Plivo
       currentSession.streamer.addAudio(mulawBuf);
-      
+
       if (Math.random() < 0.05)
-        console.log(`[TTS→Customer] Buffered Priya audio to customer (callId: ${sessionId})`);
+        console.log(
+          `[TTS→Customer] Buffered Priya audio to customer (callId: ${sessionId})`,
+        );
     } catch (err) {
       console.error("[TTS→Plivo] Error:", err.message);
     }
@@ -324,7 +332,9 @@ agentWss.on("connection", (agentWs, req) => {
             // which is what Sarvam saaras:v3-realtime expects (NOT raw binary frames)
             currentSession.sttWs.sendAudio(pcmBuf);
             if (Math.random() < 0.05)
-              console.log(`[Agent→STT] Routed agent audio to Sarvam STT (callId: ${sessionId})`);
+              console.log(
+                `[Agent→STT] Routed agent audio to Sarvam STT (callId: ${sessionId})`,
+              );
           } catch (err) {
             console.error("[Agent→STT] Conversion error:", err.message);
           }
@@ -352,8 +362,12 @@ agentWss.on("connection", (agentWs, req) => {
 function cleanupSarvam(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
-  try { session.sttWs?.close(); } catch {}
-  try { session.ttsWs?.close(); } catch {}
+  try {
+    session.sttWs?.close();
+  } catch {}
+  try {
+    session.ttsWs?.close();
+  } catch {}
   if (session.streamer) session.streamer.stop();
   session.sttWs = null;
   session.ttsWs = null;
