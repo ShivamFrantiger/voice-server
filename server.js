@@ -12,7 +12,7 @@ const { WebSocketServer } = require("ws");
 const { dialAgent } = require("./plivoClient");
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
-const { mulawToPcm16k, pcm16kToMulaw } = require("./audioUtils");
+const { mulawToPcm16k, pcm16kToMulaw, pitchShiftMulaw } = require("./audioUtils");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +20,12 @@ const PORT = process.env.PORT || 8080;
 const SARVAM_KEY = process.env.SARVAM_API_KEY;
 const SPEAKER = process.env.SARVAM_FEMALE_SPEAKER || "priya";
 const LANG = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
+
+// Pitch shift ratio for agent → customer voice modulation.
+// +7 semitones ≈ 2^(7/12) ≈ 1.498 — clearly female.
+// Override with PITCH_SEMITONES env var (e.g. PITCH_SEMITONES=5 for subtle).
+const _semitones = parseFloat(process.env.PITCH_SEMITONES || "7");
+const PITCH_RATIO = Math.pow(2, _semitones / 12);
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
@@ -225,28 +231,32 @@ agentWss.on("connection", (agentWs, req) => {
     } else if (msg.event === "media") {
       const { track, payload } = msg.media || {};
       if (!payload) return;
-      // 'inbound' = agent's voice → send directly to customer
-      // --- SARVAM ROUTING COMMENTED OUT ---
-      // if (track === 'inbound' && session && session.sttWs && session.sttWs.readyState === 1) {
-      //   session.sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
-      //   if (Math.random() < 0.05) console.log(`[Router] Routed agent audio to STT (callId: ${sessionId})`);
-      // }
 
+      // 'inbound' = agent's voice → pitch-shift → customer
+      // Customer audio ('outbound') flows the other direction and is NOT touched here.
       if (
         track === "inbound" &&
         session &&
         session.customerWs &&
         session.customerWs.readyState === 1
       ) {
+        let shiftedPayload;
+        try {
+          shiftedPayload = pitchShiftMulaw(payload, PITCH_RATIO);
+        } catch (err) {
+          console.error("[PitchShift] Error:", err.message);
+          shiftedPayload = payload; // fallback: send original on error
+        }
+
         session.customerWs.send(
           JSON.stringify({
             event: "playAudio",
-            media: { contentType: "audio/x-mulaw", sampleRate: 8000, payload },
+            media: { contentType: "audio/x-mulaw", sampleRate: 8000, payload: shiftedPayload },
           }),
         );
         if (Math.random() < 0.05)
           console.log(
-            `[Router] Routed raw agent audio directly to CustomerWS (callId: ${sessionId})`,
+            `[Router] Routed PITCH-SHIFTED agent audio to CustomerWS (ratio=${PITCH_RATIO.toFixed(3)}, callId: ${sessionId})`,
           );
       }
     }
