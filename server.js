@@ -1,41 +1,46 @@
 // server.js — Voice Modulation Server
 // Bridges Plivo WebSocket streaming with Sarvam STT + TTS
 // to convert the agent's voice to female before sending to the customer.
+//
 
-require('dotenv').config();
+require("dotenv").config();
 
-const express    = require('express');
-const http       = require('http');
-const { WebSocketServer } = require('ws');
+const express = require("express");
+const http = require("http");
+const { WebSocketServer } = require("ws");
 
-const { dialAgent }       = require('./plivoClient');
-const { createSarvamSTT } = require('./sarvamSTT');
-const { createSarvamTTS } = require('./sarvamTTS');
-const { mulawToPcm16k, pcm16kToMulaw } = require('./audioUtils');
+const { dialAgent } = require("./plivoClient");
+const { createSarvamSTT } = require("./sarvamSTT");
+const { createSarvamTTS } = require("./sarvamTTS");
+const { mulawToPcm16k, pcm16kToMulaw } = require("./audioUtils");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT       = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080;
 const SARVAM_KEY = process.env.SARVAM_API_KEY;
-const SPEAKER    = process.env.SARVAM_FEMALE_SPEAKER || 'priya';
-const LANG       = process.env.SARVAM_LANGUAGE_CODE  || 'hi-IN';
+const SPEAKER = process.env.SARVAM_FEMALE_SPEAKER || "priya";
+const LANG = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 
 // Use noServer:true + manual upgrade routing to avoid ws upgrade event
 // conflicts when multiple WebSocketServer instances share the same HTTP server.
-const wss      = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true });
 const agentWss = new WebSocketServer({ noServer: true });
 
-server.on('upgrade', (req, socket, head) => {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
-  if (pathname === '/stream') {
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-  } else if (pathname === '/agent-stream') {
-    agentWss.handleUpgrade(req, socket, head, (ws) => agentWss.emit('connection', ws, req));
+server.on("upgrade", (req, socket, head) => {
+  const pathname = new URL(req.url, "http://localhost").pathname;
+  if (pathname === "/stream") {
+    wss.handleUpgrade(req, socket, head, (ws) =>
+      wss.emit("connection", ws, req),
+    );
+  } else if (pathname === "/agent-stream") {
+    agentWss.handleUpgrade(req, socket, head, (ws) =>
+      agentWss.emit("connection", ws, req),
+    );
   } else {
     socket.destroy();
   }
@@ -47,15 +52,15 @@ app.use(express.urlencoded({ extended: true }));
 // ─── HTTP Routes ─────────────────────────────────────────────────────────────
 
 // Health check
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Voice modulation server is running' });
+app.get("/", (req, res) => {
+  res.json({ status: "ok", message: "Voice modulation server is running" });
 });
 
 // Plivo hits this when the agent picks up.
 // Returns XML pointing to /agent-stream (NOT /stream, to avoid re-triggering dialAgent).
-app.post('/api/plivo/agent-answer', (req, res) => {
+app.post("/api/plivo/agent-answer", (req, res) => {
   const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
-  let wsUrl = serverUrl.replace(/^https?/, 'wss') + '/agent-stream';
+  let wsUrl = serverUrl.replace(/^https?/, "wss") + "/agent-stream";
 
   if (req.query.sessionId) {
     wsUrl += `?sessionId=${req.query.sessionId}`;
@@ -68,7 +73,7 @@ app.post('/api/plivo/agent-answer', (req, res) => {
   </Stream>
 </Response>`;
 
-  res.set('Content-Type', 'text/xml');
+  res.set("Content-Type", "text/xml");
   res.send(xml);
 });
 
@@ -76,23 +81,30 @@ app.post('/api/plivo/agent-answer', (req, res) => {
 
 const sessions = new Map();
 
-wss.on('connection', (plivoWs) => {
-  console.log('\n[WS] ─── New Plivo connection ─────────────────────');
+wss.on("connection", (plivoWs) => {
+  console.log("\n[WS] ─── New Plivo connection ─────────────────────");
 
-  let callUUID  = null;
+  let callUUID = null;
   let sessionId = null;
-  let sttWs     = null;
-  let ttsWs     = null;
+  let sttWs = null;
+  let ttsWs = null;
 
-  plivoWs.on('message', async (raw) => {
+  plivoWs.on("message", async (raw) => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
     switch (msg.event) {
-
       // ── start ─────────────────────────────────────────────────────────────
-      case 'start': {
-        callUUID  = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid || 'unknown';
+      case "start": {
+        callUUID =
+          msg.start?.callId ||
+          msg.start?.callUUID ||
+          msg.start?.call_uuid ||
+          "unknown";
         sessionId = callUUID;
         console.log(`[WS] Call started | UUID: ${callUUID}`);
         console.log(`[WS] Metadata:`, JSON.stringify(msg.start, null, 2));
@@ -121,37 +133,50 @@ wss.on('connection', (plivoWs) => {
         //   }
         // });
 
-        sessions.set(sessionId, { customerWs: plivoWs, sttWs: null, ttsWs: null });
+        sessions.set(sessionId, {
+          customerWs: plivoWs,
+          sttWs: null,
+          ttsWs: null,
+        });
 
         // Dial the agent once
         try {
           await dialAgent(sessionId);
         } catch (err) {
-          console.error('[Plivo] Failed to dial agent:', err.message);
+          console.error("[Plivo] Failed to dial agent:", err.message);
         }
         break;
       }
 
       // ── media ─────────────────────────────────────────────────────────────
-      case 'media': {
+      case "media": {
         const { track, payload } = msg.media || {};
         if (!payload) break;
         // Send customer audio to the agent so they can hear
-        if (track === 'inbound') {
+        if (track === "inbound") {
           const session = sessions.get(sessionId);
           if (session && session.agentWs && session.agentWs.readyState === 1) {
-            session.agentWs.send(JSON.stringify({
-              event: 'playAudio',
-              media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
-            }));
-            if (Math.random() < 0.05) console.log(`[Router] Routed customer audio to AgentWS (callId: ${sessionId})`);
+            session.agentWs.send(
+              JSON.stringify({
+                event: "playAudio",
+                media: {
+                  contentType: "audio/x-mulaw",
+                  sampleRate: 8000,
+                  payload,
+                },
+              }),
+            );
+            if (Math.random() < 0.05)
+              console.log(
+                `[Router] Routed customer audio to AgentWS (callId: ${sessionId})`,
+              );
           }
         }
         break;
       }
 
       // ── stop ──────────────────────────────────────────────────────────────
-      case 'stop': {
+      case "stop": {
         console.log(`[WS] Call stopped | UUID: ${callUUID}`);
         cleanup(sessionId, sttWs, ttsWs);
         break;
@@ -159,22 +184,22 @@ wss.on('connection', (plivoWs) => {
     }
   });
 
-  plivoWs.on('close', (code) => {
+  plivoWs.on("close", (code) => {
     console.log(`[WS] Connection closed (code=${code}) | UUID: ${callUUID}`);
     cleanup(sessionId, sttWs, ttsWs);
   });
 
-  plivoWs.on('error', (err) => console.error('[WS] Error:', err.message));
+  plivoWs.on("error", (err) => console.error("[WS] Error:", err.message));
 });
 
 // ─── Agent WebSocket Handler (/agent-stream) ──────────────────────────────────
 // Handles agent's phone audio. Does NOT call dialAgent() — prevents the loop.
 
-agentWss.on('connection', (agentWs, req) => {
-  console.log('[AgentWS] ─── Agent leg connected ──────────────────');
+agentWss.on("connection", (agentWs, req) => {
+  console.log("[AgentWS] ─── Agent leg connected ──────────────────");
 
-  const url = new URL(req.url, 'http://localhost');
-  const sessionId = url.searchParams.get('sessionId');
+  const url = new URL(req.url, "http://localhost");
+  const sessionId = url.searchParams.get("sessionId");
   let session = sessions.get(sessionId);
 
   if (session) {
@@ -184,14 +209,20 @@ agentWss.on('connection', (agentWs, req) => {
     console.warn(`[AgentWS] No active session found for ${sessionId}`);
   }
 
-  agentWs.on('message', (raw) => {
+  agentWs.on("message", (raw) => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-    
-    if (msg.event === 'start') {
-      console.log('[AgentWS] Agent call started | UUID:', msg.start?.callId || msg.start?.callUUID || 'unknown');
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
     }
-    else if (msg.event === 'media') {
+
+    if (msg.event === "start") {
+      console.log(
+        "[AgentWS] Agent call started | UUID:",
+        msg.start?.callId || msg.start?.callUUID || "unknown",
+      );
+    } else if (msg.event === "media") {
       const { track, payload } = msg.media || {};
       if (!payload) return;
       // 'inbound' = agent's voice → send directly to customer
@@ -200,42 +231,56 @@ agentWss.on('connection', (agentWs, req) => {
       //   session.sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
       //   if (Math.random() < 0.05) console.log(`[Router] Routed agent audio to STT (callId: ${sessionId})`);
       // }
-      
-      if (track === 'inbound' && session && session.customerWs && session.customerWs.readyState === 1) {
-        session.customerWs.send(JSON.stringify({
-          event: 'playAudio',
-          media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
-        }));
-        if (Math.random() < 0.05) console.log(`[Router] Routed raw agent audio directly to CustomerWS (callId: ${sessionId})`);
+
+      if (
+        track === "inbound" &&
+        session &&
+        session.customerWs &&
+        session.customerWs.readyState === 1
+      ) {
+        session.customerWs.send(
+          JSON.stringify({
+            event: "playAudio",
+            media: { contentType: "audio/x-mulaw", sampleRate: 8000, payload },
+          }),
+        );
+        if (Math.random() < 0.05)
+          console.log(
+            `[Router] Routed raw agent audio directly to CustomerWS (callId: ${sessionId})`,
+          );
       }
     }
   });
 
-  agentWs.on('close', (code) => {
+  agentWs.on("close", (code) => {
     console.log(`[AgentWS] Closed (code=${code})`);
     if (session) session.agentWs = null;
   });
-  agentWs.on('error', (err) => console.error('[AgentWS] Error:', err.message));
+  agentWs.on("error", (err) => console.error("[AgentWS] Error:", err.message));
 });
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 function cleanup(sessionId, sttWs, ttsWs) {
   if (sessionId) sessions.delete(sessionId);
-  try { sttWs?.close(); } catch {}
-  try { ttsWs?.close(); } catch {}
+  try {
+    sttWs?.close();
+  } catch {}
+  try {
+    ttsWs?.close();
+  } catch {}
 }
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
-  console.log('');
-  console.log('╔══════════════════════════════════════════╗');
-  console.log('║       Voice Modulation Server            ║');
+  console.log("");
+  console.log("╔══════════════════════════════════════════╗");
+  console.log("║       Voice Modulation Server            ║");
   console.log(`║   HTTP : http://localhost:${PORT}          ║`);
   console.log(`║   WS   : ws://localhost:${PORT}/stream     ║`);
   console.log(`║   WS   : ws://localhost:${PORT}/agent-stream ║`);
   console.log(`║   Voice: ${SPEAKER} (${LANG})          ║`);
-  console.log('╚══════════════════════════════════════════╝');
-  console.log('');
+  console.log("╚══════════════════════════════════════════╝");
+  console.log("");
 });
