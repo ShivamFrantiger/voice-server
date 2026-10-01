@@ -14,7 +14,8 @@ const WebSocket = require('ws');
  * @returns {WebSocket}           - The connected WebSocket instance
  */
 function createSarvamSTT(apiKey, languageCode, onTranscript) {
-  const ws = new WebSocket('wss://api.sarvam.ai/speech-to-text-realtime/ws', {
+  const url = `wss://api.sarvam.ai/speech-to-text-realtime/ws?language_code=${encodeURIComponent(languageCode)}`;
+  const ws = new WebSocket(url, {
     headers: {
       'api-subscription-key': apiKey,
     },
