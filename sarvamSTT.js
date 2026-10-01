@@ -58,13 +58,15 @@ function createSarvamSTT(apiKey, languageCode, onTranscript) {
     // Shape C (observed in some builds):
     //   { type: "data", data: { transcript: "text" } }
 
-    // Shape A
-    if (msg.event && msg.transcript !== undefined) {
+    // Shape A — actual Sarvam v3-realtime format (confirmed from live logs):
+    //   { event: "transcript.final" | "transcript.partial", text: "...", utterance_idx: N }
+    // NOTE: field is `text`, NOT `transcript`.
+    if (msg.event && msg.text !== undefined) {
       const isFinal = msg.event === 'transcript.final';
       const partial = msg.event === 'transcript.partial';
-      if ((isFinal || partial) && msg.transcript.trim().length > 0) {
-        console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'} (shape A): "${msg.transcript}"`);
-        onTranscript(msg.transcript, isFinal);
+      if ((isFinal || partial) && msg.text.trim().length > 0) {
+        console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'}: "${msg.text}"`);
+        onTranscript(msg.text, isFinal);
       }
       return;
     }
