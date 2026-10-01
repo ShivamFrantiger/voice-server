@@ -268,7 +268,9 @@ agentWss.on("connection", (agentWs, req) => {
         if (currentSession?.sttWs?.readyState === 1) {
           try {
             const pcmBuf = mulawToPcm16k(Buffer.from(payload, "base64"));
-            currentSession.sttWs.send(pcmBuf); // binary frame — Sarvam expects raw PCM
+            // sendAudio() wraps PCM in { event:"audio_input", audio:<base64> } JSON
+            // which is what Sarvam saaras:v3-realtime expects (NOT raw binary frames)
+            currentSession.sttWs.sendAudio(pcmBuf);
             if (Math.random() < 0.05)
               console.log(`[Agent→STT] Routed agent audio to Sarvam STT (callId: ${sessionId})`);
           } catch (err) {
