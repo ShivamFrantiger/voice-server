@@ -24,6 +24,60 @@ const SARVAM_KEY = process.env.SARVAM_API_KEY;
 const SPEAKER = process.env.SARVAM_FEMALE_SPEAKER || "priya";
 const LANG    = process.env.SARVAM_LANGUAGE_CODE   || "hi-IN";
 
+// ─── Audio Streamer (Jitter Buffer) ──────────────────────────────────────────
+// Plivo prefers steady chunks of audio rather than large burst payloads.
+class AudioStreamer {
+  constructor(ws, sessionId) {
+    this.ws = ws;
+    this.sessionId = sessionId;
+    this.queue = Buffer.alloc(0);
+    this.timer = null;
+    this.chunkSize = 160; // 20ms of 8kHz mulaw
+    this.interval = 20; // 20ms
+  }
+
+  addAudio(mulawBuffer) {
+    this.queue = Buffer.concat([this.queue, mulawBuffer]);
+    if (!this.timer) {
+      this.startStreaming();
+    }
+  }
+
+  startStreaming() {
+    this.timer = setInterval(() => {
+      if (this.queue.length >= this.chunkSize) {
+        const chunk = this.queue.subarray(0, this.chunkSize);
+        this.queue = this.queue.subarray(this.chunkSize);
+        this.sendChunk(chunk);
+      } else if (this.queue.length > 0) {
+        // Optional: drain the last tiny bit, but usually we just wait for more.
+      } else {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+    }, this.interval);
+  }
+
+  sendChunk(chunk) {
+    if (this.ws.readyState === 1) {
+      this.ws.send(JSON.stringify({
+        event: "playAudio",
+        media: {
+          contentType: "audio/x-mulaw",
+          sampleRate: 8000,
+          payload: chunk.toString("base64"),
+        },
+      }));
+    }
+  }
+  
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.queue = Buffer.alloc(0);
+  }
+}
+
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
 const app    = express();
@@ -118,6 +172,7 @@ wss.on("connection", (plivoWs) => {
           agentWs:    null,
           sttWs:      null,
           ttsWs:      null,
+          streamer:   new AudioStreamer(plivoWs, sessionId),
         });
 
         // Dial the agent once
@@ -198,7 +253,8 @@ agentWss.on("connection", (agentWs, req) => {
   // ── Initialise Sarvam TTS (Priya) ─────────────────────────────────────────
   // Create TTS first so it's ready when STT produces transcripts.
   const ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
-    // TTS gives us PCM16 @ 16kHz — convert to μ-law @ 8kHz for Plivo.
+    // TTS gives us PCM16 @ 24kHz (often with a WAV header). 
+    // Convert to μ-law @ 8kHz for Plivo using our fixed audioUtils.
     const currentSession = sessions.get(sessionId);
     if (
       !currentSession ||
@@ -208,18 +264,11 @@ agentWss.on("connection", (agentWs, req) => {
 
     try {
       const mulawBuf = pcm24kToMulaw(pcmBuffer);
-      currentSession.customerWs.send(
-        JSON.stringify({
-          event: "playAudio",
-          media: {
-            contentType: "audio/x-mulaw",
-            sampleRate: 8000,
-            payload: mulawBuf.toString("base64"),
-          },
-        }),
-      );
+      // Queue it up in the streamer to avoid bursting Plivo
+      currentSession.streamer.addAudio(mulawBuf);
+      
       if (Math.random() < 0.05)
-        console.log(`[TTS→Customer] Sent Priya audio to customer (callId: ${sessionId})`);
+        console.log(`[TTS→Customer] Buffered Priya audio to customer (callId: ${sessionId})`);
     } catch (err) {
       console.error("[TTS→Plivo] Error:", err.message);
     }
@@ -302,6 +351,7 @@ function cleanupSarvam(sessionId) {
   if (!session) return;
   try { session.sttWs?.close(); } catch {}
   try { session.ttsWs?.close(); } catch {}
+  if (session.streamer) session.streamer.stop();
   session.sttWs = null;
   session.ttsWs = null;
 }
