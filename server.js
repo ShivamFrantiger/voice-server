@@ -104,10 +104,11 @@ wss.on('connection', (plivoWs) => {
 
         // Create TTS — only after call is confirmed
         ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
-          if (plivoWs.readyState !== 1) return;
+          const session = sessions.get(sessionId);
+          if (!session || !session.customerWs || session.customerWs.readyState !== 1) return;
           try {
             const mulawBuf = pcm16kToMulaw(pcmBuffer);
-            plivoWs.send(JSON.stringify({
+            session.customerWs.send(JSON.stringify({
               event: 'playAudio',
               media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload: mulawBuf.toString('base64') },
             }));
@@ -116,11 +117,11 @@ wss.on('connection', (plivoWs) => {
           }
         });
 
-        sessions.set(sessionId, { sttWs, ttsWs });
+        sessions.set(sessionId, { customerWs: plivoWs, sttWs, ttsWs });
 
         // Dial the agent once
         try {
-          await dialAgent();
+          await dialAgent(sessionId);
         } catch (err) {
           console.error('[Plivo] Failed to dial agent:', err.message);
         }
@@ -131,9 +132,15 @@ wss.on('connection', (plivoWs) => {
       case 'media': {
         const { track, payload } = msg.media || {};
         if (!payload) break;
-        // 'outbound' = agent's voice → convert to female via STT→TTS
-        if (track === 'outbound' && sttWs?.readyState === 1) {
-          sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
+        // Send customer audio to the agent so they can hear
+        if (track === 'inbound') {
+          const session = sessions.get(sessionId);
+          if (session && session.agentWs && session.agentWs.readyState === 1) {
+            session.agentWs.send(JSON.stringify({
+              event: 'playAudio',
+              media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
+            }));
+          }
         }
         break;
       }
@@ -158,18 +165,41 @@ wss.on('connection', (plivoWs) => {
 // ─── Agent WebSocket Handler (/agent-stream) ──────────────────────────────────
 // Handles agent's phone audio. Does NOT call dialAgent() — prevents the loop.
 
-agentWss.on('connection', (agentWs) => {
+agentWss.on('connection', (agentWs, req) => {
   console.log('[AgentWS] ─── Agent leg connected ──────────────────');
+
+  const url = new URL(req.url, 'http://localhost');
+  const sessionId = url.searchParams.get('sessionId');
+  let session = sessions.get(sessionId);
+
+  if (session) {
+    session.agentWs = agentWs;
+    console.log(`[AgentWS] Linked to session ${sessionId}`);
+  } else {
+    console.warn(`[AgentWS] No active session found for ${sessionId}`);
+  }
 
   agentWs.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
+    
     if (msg.event === 'start') {
       console.log('[AgentWS] Agent call started | UUID:', msg.start?.callUUID || 'unknown');
     }
+    else if (msg.event === 'media') {
+      const { track, payload } = msg.media || {};
+      if (!payload) return;
+      // 'inbound' = agent's voice → send to Sarvam STT
+      if (track === 'inbound' && session && session.sttWs && session.sttWs.readyState === 1) {
+        session.sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
+      }
+    }
   });
 
-  agentWs.on('close', (code) => console.log(`[AgentWS] Closed (code=${code})`));
+  agentWs.on('close', (code) => {
+    console.log(`[AgentWS] Closed (code=${code})`);
+    if (session) session.agentWs = null;
+  });
   agentWs.on('error', (err) => console.error('[AgentWS] Error:', err.message));
 });
 

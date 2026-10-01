@@ -15,10 +15,20 @@ const client = new plivo.Client(
  *
  * @returns {Promise<object>} Plivo call response
  */
-async function dialAgent() {
+async function dialAgent(sessionId) {
   const from = process.env.PLIVO_FROM_NUMBER;
   const to   = process.env.AGENT_PHONE_NUMBER;
-  const answerUrl = process.env.AGENT_ANSWER_URL;
+  
+  let answerUrl = process.env.AGENT_ANSWER_URL;
+  if (sessionId) {
+    try {
+      const url = new URL(answerUrl);
+      url.searchParams.set('sessionId', sessionId);
+      answerUrl = url.toString();
+    } catch (e) {
+      answerUrl += (answerUrl.includes('?') ? '&' : '?') + `sessionId=${sessionId}`;
+    }
+  }
 
   console.log(`[Plivo] Dialing agent: ${from} → ${to}`);
 
