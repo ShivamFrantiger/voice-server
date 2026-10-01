@@ -33,8 +33,9 @@ function createSarvamTTS(apiKey, speaker, languageCode, onAudioChunk) {
         pace: 1.0,
         pitch: 0,
         loudness: 1.5,
+        output_audio_codec: 'mulaw',
         sample_rate: 8000,
-        speech_sample_rate: 8000
+        audio_format: 'mulaw'
       },
     }));
   });

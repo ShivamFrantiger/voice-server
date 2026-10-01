@@ -11,6 +11,7 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const { WebSocketServer } = require("ws");
+const fs = require("fs"); // Added for debugging
 
 const { dialAgent } = require("./plivoClient");
 const { createSarvamSTT } = require("./sarvamSTT");
@@ -253,8 +254,8 @@ agentWss.on("connection", (agentWs, req) => {
   // ── Initialise Sarvam TTS (Priya) ─────────────────────────────────────────
   // Create TTS first so it's ready when STT produces transcripts.
   const ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
-    // TTS gives us PCM16 @ 24kHz (often with a WAV header). 
-    // Convert to μ-law @ 8kHz for Plivo using our fixed audioUtils.
+    // Sarvam is now natively returning 8kHz mu-law (thanks to our updated config).
+    // No resampling or decoding is required!
     const currentSession = sessions.get(sessionId);
     if (
       !currentSession ||
@@ -263,9 +264,11 @@ agentWss.on("connection", (agentWs, req) => {
     ) return;
 
     try {
-      const mulawBuf = pcm24kToMulaw(pcmBuffer);
-      // Queue it up in the streamer to avoid bursting Plivo
-      currentSession.streamer.addAudio(mulawBuf);
+      // DEBUG: Dump output mulaw buffer
+      fs.appendFileSync('debug_sarvam_mulaw.raw', pcmBuffer);
+
+      // Queue the native mu-law directly into the streamer to avoid bursting Plivo
+      currentSession.streamer.addAudio(pcmBuffer);
       
       if (Math.random() < 0.05)
         console.log(`[TTS→Customer] Buffered Priya audio to customer (callId: ${sessionId})`);
