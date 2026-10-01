@@ -63,4 +63,23 @@ function pcm8kToMulaw(pcmBuffer) {
   return Buffer.from(encoded.buffer);
 }
 
-module.exports = { mulawToPcm16k, pcm16kToMulaw, pcm8kToMulaw };
+/**
+ * Encode PCM16 24kHz Buffer → μ-law 8kHz Buffer (Sarvam TTS bulbul:v3 default).
+ *
+ * @param {Buffer} pcmBuffer - raw PCM16 bytes from Sarvam TTS at 24kHz
+ * @returns {Buffer}         - μ-law at 8kHz
+ */
+function pcm24kToMulaw(pcmBuffer) {
+  const pcm24k = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
+  
+  // Downsample 24kHz → 8kHz by taking every 3rd sample
+  const pcm8k = new Int16Array(Math.floor(pcm24k.length / 3));
+  for (let i = 0; i < pcm8k.length; i++) {
+    pcm8k[i] = pcm24k[i * 3];
+  }
+  
+  const encoded = alawmulaw.mulaw.encode(pcm8k);
+  return Buffer.from(encoded.buffer);
+}
+
+module.exports = { mulawToPcm16k, pcm16kToMulaw, pcm8kToMulaw, pcm24kToMulaw };
