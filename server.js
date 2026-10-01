@@ -15,7 +15,7 @@ const { WebSocketServer } = require("ws");
 const { dialAgent } = require("./plivoClient");
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
-const { mulawToPcm16k, pcm16kToMulaw } = require("./audioUtils");
+const { mulawToPcm16k, pcm8kToMulaw } = require("./audioUtils");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -207,7 +207,7 @@ agentWss.on("connection", (agentWs, req) => {
     ) return;
 
     try {
-      const mulawBuf = pcm16kToMulaw(pcmBuffer);
+      const mulawBuf = pcm8kToMulaw(pcmBuffer);
       currentSession.customerWs.send(
         JSON.stringify({
           event: "playAudio",

@@ -51,4 +51,16 @@ function pcm16kToMulaw(pcmBuffer) {
   return Buffer.from(encoded.buffer);
 }
 
-module.exports = { mulawToPcm16k, pcm16kToMulaw };
+/**
+ * Encode PCM16 8kHz Buffer → μ-law 8kHz Buffer (Sarvam TTS output → Plivo).
+ *
+ * @param {Buffer} pcmBuffer - raw PCM16 bytes from Sarvam TTS at 8kHz
+ * @returns {Buffer}         - μ-law at 8kHz
+ */
+function pcm8kToMulaw(pcmBuffer) {
+  const pcm8k = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
+  const encoded = alawmulaw.mulaw.encode(pcm8k);
+  return Buffer.from(encoded.buffer);
+}
+
+module.exports = { mulawToPcm16k, pcm16kToMulaw, pcm8kToMulaw };
