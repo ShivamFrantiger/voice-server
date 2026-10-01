@@ -116,6 +116,7 @@ wss.on('connection', (plivoWs) => {
               event: 'playAudio',
               media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload: mulawBuf.toString('base64') },
             }));
+            console.log(`[TTS] Sent modulated audio to CustomerWS (callId: ${sessionId})`);
           } catch (err) {
             console.error('[TTS→Plivo] Error:', err.message);
           }
@@ -144,6 +145,7 @@ wss.on('connection', (plivoWs) => {
               event: 'playAudio',
               media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload },
             }));
+            if (Math.random() < 0.05) console.log(`[Router] Routed customer audio to AgentWS (callId: ${sessionId})`);
           }
         }
         break;
@@ -196,6 +198,7 @@ agentWss.on('connection', (agentWs, req) => {
       // 'inbound' = agent's voice → send to Sarvam STT
       if (track === 'inbound' && session && session.sttWs && session.sttWs.readyState === 1) {
         session.sttWs.send(mulawToPcm16k(Buffer.from(payload, 'base64')));
+        if (Math.random() < 0.05) console.log(`[Router] Routed agent audio to STT (callId: ${sessionId})`);
       }
     }
   });
