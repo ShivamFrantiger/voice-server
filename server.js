@@ -24,7 +24,8 @@ const LANG          = process.env.SARVAM_LANGUAGE_CODE  || 'hi-IN';
 
 const app    = express();
 const server = http.createServer(app);
-const wss    = new WebSocketServer({ server, path: '/stream' });
+const wss        = new WebSocketServer({ server, path: '/stream' });
+const agentWss   = new WebSocketServer({ server, path: '/agent-stream' });
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -38,7 +39,8 @@ app.get('/', (req, res) => {
 // We return XML that tells Plivo to stream the agent's audio to our WebSocket.
 app.post('/api/plivo/agent-answer', (req, res) => {
   const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
-  const wsUrl = serverUrl.replace(/^https?/, 'wss') + '/stream';
+  // Use /agent-stream — a separate path that does NOT trigger dialAgent() again
+  const wsUrl = serverUrl.replace(/^https?/, 'wss') + '/agent-stream';
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -168,6 +170,31 @@ wss.on('connection', (plivoWs, req) => {
 
   plivoWs.on('error', (err) => {
     console.error('[WS] Plivo WebSocket error:', err.message);
+  });
+});
+
+// ─── Agent WebSocket Handler (/agent-stream) ──────────────────────────────────
+// This handles the second call leg (agent's phone audio).
+// It does NOT dial anyone — just logs the connection.
+// Agent audio processing can be added here in the future if needed.
+
+agentWss.on('connection', (agentWs, req) => {
+  console.log('[AgentWS] ─── Agent leg connected ──────────────────');
+
+  agentWs.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.event === 'start') {
+      console.log('[AgentWS] Agent call started | UUID:', msg.start?.callUUID || 'unknown');
+    }
+  });
+
+  agentWs.on('close', (code) => {
+    console.log(`[AgentWS] Agent leg closed (code=${code})`);
+  });
+
+  agentWs.on('error', (err) => {
+    console.error('[AgentWS] Error:', err.message);
   });
 });
 
