@@ -55,7 +55,11 @@ app.get('/', (req, res) => {
 // Returns XML pointing to /agent-stream (NOT /stream, to avoid re-triggering dialAgent).
 app.post('/api/plivo/agent-answer', (req, res) => {
   const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
-  const wsUrl = serverUrl.replace(/^https?/, 'wss') + '/agent-stream';
+  let wsUrl = serverUrl.replace(/^https?/, 'wss') + '/agent-stream';
+
+  if (req.query.sessionId) {
+    wsUrl += `?sessionId=${req.query.sessionId}`;
+  }
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -88,7 +92,7 @@ wss.on('connection', (plivoWs) => {
 
       // ── start ─────────────────────────────────────────────────────────────
       case 'start': {
-        callUUID  = msg.start?.callUUID || msg.start?.call_uuid || 'unknown';
+        callUUID  = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid || 'unknown';
         sessionId = callUUID;
         console.log(`[WS] Call started | UUID: ${callUUID}`);
         console.log(`[WS] Metadata:`, JSON.stringify(msg.start, null, 2));
@@ -184,7 +188,7 @@ agentWss.on('connection', (agentWs, req) => {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     
     if (msg.event === 'start') {
-      console.log('[AgentWS] Agent call started | UUID:', msg.start?.callUUID || 'unknown');
+      console.log('[AgentWS] Agent call started | UUID:', msg.start?.callId || msg.start?.callUUID || 'unknown');
     }
     else if (msg.event === 'media') {
       const { track, payload } = msg.media || {};
