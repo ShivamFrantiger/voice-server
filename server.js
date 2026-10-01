@@ -34,6 +34,23 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Voice modulation server is running' });
 });
 
+// Plivo hits this URL when the agent picks up the phone.
+// We return XML that tells Plivo to stream the agent's audio to our WebSocket.
+app.post('/api/plivo/agent-answer', (req, res) => {
+  const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
+  const wsUrl = serverUrl.replace(/^https?/, 'wss') + '/stream';
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream streamTimeout="86400" keepCallAlive="true" bidirectional="true" contentType="audio/x-mulaw;rate=8000">
+    ${wsUrl}
+  </Stream>
+</Response>`;
+
+  res.set('Content-Type', 'text/xml');
+  res.send(xml);
+});
+
 // ─── WebSocket Handler ───────────────────────────────────────────────────────
 
 // Track active sessions: callSid → { sttWs, ttsWs }
