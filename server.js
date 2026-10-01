@@ -22,7 +22,7 @@ const { mulawToPcm16k, pcm24kToMulaw } = require("./audioUtils");
 
 const PORT    = process.env.PORT || 8080;
 const SARVAM_KEY = process.env.SARVAM_API_KEY;
-const SPEAKER = process.env.SARVAM_FEMALE_SPEAKER || "priya";
+const SPEAKER = process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
 const LANG    = process.env.SARVAM_LANGUAGE_CODE   || "hi-IN";
 
 // ─── Audio Streamer (Jitter Buffer) ──────────────────────────────────────────
