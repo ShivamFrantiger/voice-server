@@ -7,8 +7,8 @@
 //   mulawToWav16k() → POST /v1/speech-to-speech/{voice_id}/stream →
 //   ulaw_8000 response chunks → onAudioChunk() → AudioStreamer → Customer
 
-const alawmulaw = require('alawmulaw');
-const { mulawToWav16k } = require('./audioUtils');
+const alawmulaw = require("alawmulaw");
+const { mulawToWav16k } = require("./audioUtils");
 
 /**
  * ElevenLabsS2S — Voice Activity Detection + ElevenLabs Speech-to-Speech
@@ -25,28 +25,30 @@ const { mulawToWav16k } = require('./audioUtils');
  */
 class ElevenLabsS2S {
   constructor(apiKey, voiceId, onAudioChunk, options = {}) {
-    this.apiKey       = apiKey;
-    this.voiceId      = voiceId;
+    this.apiKey = apiKey;
+    this.voiceId = voiceId;
     this.onAudioChunk = onAudioChunk;
 
     // VAD config (Latency optimized to 300ms)
-    this.silenceDurationMs  = options.silenceDurationMs  ?? 300;
-    this.speechThreshold    = options.speechThreshold    ?? 200;
-    this.minSpeechMs        = options.minSpeechMs        ?? 250;
-    this.maxSpeechMs        = options.maxSpeechMs        ?? 15000;
-    this.modelId            = options.modelId            ?? 'eleven_multilingual_sts_v2';
+    this.silenceDurationMs = options.silenceDurationMs ?? 300;
+    this.speechThreshold = options.speechThreshold ?? 200;
+    this.minSpeechMs = options.minSpeechMs ?? 250;
+    this.maxSpeechMs = options.maxSpeechMs ?? 15000;
+    this.modelId = options.modelId ?? "eleven_multilingual_sts_v2";
 
     // VAD state
-    this._speechBuffers  = [];   // Array<Buffer> — accumulated mu-law chunks
-    this._isSpeaking     = false;
-    this._speechStart    = 0;    // Date.now() when speech began
-    this._silenceTimer   = null;
-    this._maxTimer       = null;
+    this._speechBuffers = []; // Array<Buffer> — accumulated mu-law chunks
+    this._isSpeaking = false;
+    this._speechStart = 0; // Date.now() when speech began
+    this._silenceTimer = null;
+    this._maxTimer = null;
 
     // Sequential processing queue (prevents out-of-order audio)
     this._queue = Promise.resolve();
 
-    console.log(`[S2S] Initialised | voice=${voiceId} | silence=${this.silenceDurationMs}ms`);
+    console.log(
+      `[S2S] Initialised | voice=${voiceId} | silence=${this.silenceDurationMs}ms`,
+    );
   }
 
   // ─── Public API ─────────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ class ElevenLabsS2S {
     this._clearTimers();
     this._speechBuffers = [];
     this._isSpeaking = false;
-    console.log('[S2S] Destroyed');
+    console.log("[S2S] Destroyed");
   }
 
   // ─── VAD internals ──────────────────────────────────────────────────────────
@@ -89,14 +91,14 @@ class ElevenLabsS2S {
 
     if (!this._isSpeaking) {
       // Transition to SPEAKING
-      this._isSpeaking  = true;
+      this._isSpeaking = true;
       this._speechStart = Date.now();
       this._speechBuffers = [];
-      console.log('[S2S] VAD: speech started');
+      console.log("[S2S] VAD: speech started");
 
       // Safety: force flush after maxSpeechMs
       this._maxTimer = setTimeout(() => {
-        console.log('[S2S] VAD: max speech duration reached — force flush');
+        console.log("[S2S] VAD: max speech duration reached — force flush");
         this._flush();
       }, this.maxSpeechMs);
     }
@@ -113,7 +115,7 @@ class ElevenLabsS2S {
     // Arm/reset the silence timer
     if (!this._silenceTimer) {
       this._silenceTimer = setTimeout(() => {
-        console.log('[S2S] VAD: silence detected — flushing utterance');
+        console.log("[S2S] VAD: silence detected — flushing utterance");
         this._flush();
       }, this.silenceDurationMs);
     }
@@ -128,23 +130,33 @@ class ElevenLabsS2S {
     const buffers = this._speechBuffers;
 
     // Reset VAD state immediately so new audio can accumulate
-    this._isSpeaking    = false;
+    this._isSpeaking = false;
     this._speechBuffers = [];
 
     if (speechDurationMs < this.minSpeechMs) {
-      console.log(`[S2S] VAD: utterance too short (${speechDurationMs}ms) — skipping`);
+      console.log(
+        `[S2S] VAD: utterance too short (${speechDurationMs}ms) — skipping`,
+      );
       return;
     }
 
-    console.log(`[S2S] Flushing utterance (${speechDurationMs}ms, ${buffers.length} chunks)`);
+    console.log(
+      `[S2S] Flushing utterance (${speechDurationMs}ms, ${buffers.length} chunks)`,
+    );
 
     // Enqueue — ensures responses arrive in order even if API is slow
     this._queue = this._queue.then(() => this._sendToElevenLabs(buffers));
   }
 
   _clearTimers() {
-    if (this._silenceTimer) { clearTimeout(this._silenceTimer); this._silenceTimer = null; }
-    if (this._maxTimer)     { clearTimeout(this._maxTimer);     this._maxTimer     = null; }
+    if (this._silenceTimer) {
+      clearTimeout(this._silenceTimer);
+      this._silenceTimer = null;
+    }
+    if (this._maxTimer) {
+      clearTimeout(this._maxTimer);
+      this._maxTimer = null;
+    }
   }
 
   // ─── ElevenLabs API call ────────────────────────────────────────────────────
@@ -158,7 +170,7 @@ class ElevenLabsS2S {
     try {
       combined = Buffer.concat(buffers);
     } catch (err) {
-      console.error('[S2S] Buffer concat error:', err.message);
+      console.error("[S2S] Buffer concat error:", err.message);
       return;
     }
 
@@ -167,7 +179,7 @@ class ElevenLabsS2S {
     try {
       wavBuffer = mulawToWav16k(combined);
     } catch (err) {
-      console.error('[S2S] WAV conversion error:', err.message);
+      console.error("[S2S] WAV conversion error:", err.message);
       return;
     }
 
@@ -177,29 +189,43 @@ class ElevenLabsS2S {
 
     // Use built-in FormData + Blob (Node 18+, guaranteed by Express v5)
     const form = new FormData();
-    form.append('audio', new Blob([wavBuffer], { type: 'audio/wav' }), 'utterance.wav');
-    form.append('model_id', this.modelId);
     form.append(
-      'voice_settings',
-      JSON.stringify({ stability: 0.5, similarity_boost: 0.8, style: 0, use_speaker_boost: true }),
+      "audio",
+      new Blob([wavBuffer], { type: "audio/wav" }),
+      "utterance.wav",
     );
+    form.append("model_id", this.modelId);
+    form.append(
+      "voice_settings",
+      JSON.stringify({
+        stability: 0.3,
+        similarity_boost: 1.0,
+        style: 0.3,
+        use_speaker_boost: true,
+      }),
+    );
+    form.append("remove_background_noise", "true");
 
     let response;
     try {
       response = await fetch(url, {
-        method: 'POST',
-        headers: { 'xi-api-key': this.apiKey },
+        method: "POST",
+        headers: { "xi-api-key": this.apiKey },
         body: form,
       });
     } catch (err) {
-      console.error('[S2S] Network error:', err.message);
+      console.error("[S2S] Network error:", err.message);
       return;
     }
 
     if (!response.ok) {
-      let body = '';
-      try { body = await response.text(); } catch {}
-      console.error(`[S2S] API error ${response.status}: ${body.slice(0, 200)}`);
+      let body = "";
+      try {
+        body = await response.text();
+      } catch {}
+      console.error(
+        `[S2S] API error ${response.status}: ${body.slice(0, 200)}`,
+      );
       return;
     }
 
@@ -211,16 +237,18 @@ class ElevenLabsS2S {
         bytesReceived += buf.length;
         this.onAudioChunk(buf);
       }
-      console.log(`[S2S] Streamed ${bytesReceived} bytes of ulaw_8000 to customer`);
+      console.log(
+        `[S2S] Streamed ${bytesReceived} bytes of ulaw_8000 to customer`,
+      );
     } catch (err) {
       if (
-        err.code === 'ECONNRESET' ||
-        err.message?.includes('aborted') ||
-        err.message?.includes('wsarecv')
+        err.code === "ECONNRESET" ||
+        err.message?.includes("aborted") ||
+        err.message?.includes("wsarecv")
       ) {
-        console.warn('[S2S] Stream aborted (network):', err.message);
+        console.warn("[S2S] Stream aborted (network):", err.message);
       } else {
-        console.error('[S2S] Stream error:', err.message);
+        console.error("[S2S] Stream error:", err.message);
       }
     }
   }
@@ -237,8 +265,12 @@ class ElevenLabsS2S {
   _computeRms(mulawBuffer) {
     if (mulawBuffer.length === 0) return 0;
     try {
-      const uint8  = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
-      const pcm    = alawmulaw.mulaw.decode(uint8); // Int16Array
+      const uint8 = new Uint8Array(
+        mulawBuffer.buffer,
+        mulawBuffer.byteOffset,
+        mulawBuffer.byteLength,
+      );
+      const pcm = alawmulaw.mulaw.decode(uint8); // Int16Array
       let sumSq = 0;
       for (let i = 0; i < pcm.length; i++) sumSq += pcm[i] * pcm[i];
       return Math.sqrt(sumSq / pcm.length);
