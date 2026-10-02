@@ -6,7 +6,7 @@
 // Responses:    JSON  { event: "transcript.partial" | "transcript.final", transcript: "..." }
 //               OR    { type: "data", data: { transcript: "..." } }  (legacy format — handled too)
 
-const WebSocket = require('ws');
+const WebSocket = require("ws");
 
 /**
  * Creates a Sarvam Realtime STT WebSocket connection.
@@ -19,30 +19,31 @@ const WebSocket = require('ws');
  */
 function createSarvamSTT(apiKey, languageCode, onTranscript) {
   // Pass model + language as query params so no config message is needed
-  const url = `wss://api.sarvam.ai/speech-to-text-realtime/ws` +
+  const url =
+    `wss://api.sarvam.ai/speech-to-text-realtime/ws` +
     `?language_code=${encodeURIComponent(languageCode)}` +
     `&model=saaras:v3-realtime`;
 
   const ws = new WebSocket(url, {
     headers: {
-      'api-subscription-key': apiKey,
+      "api-subscription-key": apiKey,
     },
   });
 
-  ws.on('open', () => {
-    console.log('[STT] Connected to Sarvam STT WebSocket');
+  ws.on("open", () => {
+    console.log("[STT] Connected to Sarvam STT WebSocket");
   });
 
-  ws.on('message', (raw) => {
+  ws.on("message", (raw) => {
     // ── Raw dump — log EVERYTHING so we can see the actual server format ──────
     const text = raw.toString();
-    console.log('[STT] RAW message from Sarvam:', text.slice(0, 300));
+    console.log("[STT] RAW message from Sarvam:", text.slice(0, 300));
 
     let msg;
     try {
       msg = JSON.parse(text);
     } catch {
-      console.warn('[STT] Non-JSON message received:', text.slice(0, 100));
+      console.warn("[STT] Non-JSON message received:", text.slice(0, 100));
       return;
     }
 
@@ -62,25 +63,27 @@ function createSarvamSTT(apiKey, languageCode, onTranscript) {
     //   { event: "transcript.final" | "transcript.partial", text: "...", utterance_idx: N }
     // NOTE: field is `text`, NOT `transcript`.
     if (msg.event && msg.text !== undefined) {
-      const isFinal = msg.event === 'transcript.final';
-      const partial = msg.event === 'transcript.partial';
+      const isFinal = msg.event === "transcript.final";
+      const partial = msg.event === "transcript.partial";
       if ((isFinal || partial) && msg.text.trim().length > 0) {
-        console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'}: "${msg.text}"`);
+        console.log(`[STT] ${isFinal ? "FINAL" : "partial"}: "${msg.text}"`);
         onTranscript(msg.text, isFinal);
       }
       return;
     }
 
     // Shape B — { type: "transcript", data: { transcript, is_final } }
-    if (msg.type === 'transcript' && msg.data?.transcript) {
+    if (msg.type === "transcript" && msg.data?.transcript) {
       const isFinal = msg.data.is_final ?? true;
-      console.log(`[STT] ${isFinal ? 'FINAL' : 'partial'} (shape B): "${msg.data.transcript}"`);
+      console.log(
+        `[STT] ${isFinal ? "FINAL" : "partial"} (shape B): "${msg.data.transcript}"`,
+      );
       onTranscript(msg.data.transcript, isFinal);
       return;
     }
 
     // Shape C — { type: "data", data: { transcript } }
-    if (msg.type === 'data' && msg.data?.transcript) {
+    if (msg.type === "data" && msg.data?.transcript) {
       console.log(`[STT] FINAL (shape C): "${msg.data.transcript}"`);
       onTranscript(msg.data.transcript, true);
       return;
@@ -89,11 +92,11 @@ function createSarvamSTT(apiKey, languageCode, onTranscript) {
     // Anything else — already dumped above via RAW log
   });
 
-  ws.on('error', (err) => {
-    console.error('[STT] WebSocket error:', err.message);
+  ws.on("error", (err) => {
+    console.error("[STT] WebSocket error:", err.message);
   });
 
-  ws.on('close', (code, reason) => {
+  ws.on("close", (code, reason) => {
     console.log(`[STT] Closed (code=${code}, reason=${reason.toString()})`);
   });
 
@@ -105,10 +108,12 @@ function createSarvamSTT(apiKey, languageCode, onTranscript) {
    */
   ws.sendAudio = (pcmBuffer) => {
     if (ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({
-      event: 'audio_input',
-      audio: pcmBuffer.toString('base64'),
-    }));
+    ws.send(
+      JSON.stringify({
+        event: "audio_input",
+        audio: pcmBuffer.toString("base64"),
+      }),
+    );
   };
 
   return ws;

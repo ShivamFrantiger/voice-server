@@ -1,30 +1,62 @@
-// server.js — Voice Modulation Server
-// Bridges Plivo WebSocket streaming with Sarvam STT + TTS
-// to convert the agent's voice to Sarvam Priya before sending to the customer.
+﻿// server.js — Voice Modulation Server
+// Bridges Plivo WebSocket streaming with ElevenLabs Speech-to-Speech
+// to convert the agent voice before sending to the customer.
 //
 // Flow:
 //   Customer  ──inbound──► /stream   ──────────────────────────────► AgentWS  (raw, no mod)
-//   AgentWS   ──inbound──► /agent-stream → STT → transcript → TTS → CustomerWS  (Priya voice)
+//   AgentWS   ──inbound──► /agent-stream → ElevenLabs S2S → ulaw_8000 → CustomerWS
 
 require("dotenv").config();
+
+// ─── Process-level guards ─────────────────────────────────────────────────────
+// Windows wsarecv TCP abort errors from dropped WebSocket connections
+// surface as unhandled rejections or uncaught exceptions.
+// Log them and keep the server alive rather than crashing.
+process.on("uncaughtException", (err) => {
+  if (
+    err.code === "ECONNRESET" ||
+    err.message?.includes("wsarecv") ||
+    err.message?.includes("stream reading error") ||
+    err.message?.includes("aborted")
+  ) {
+    console.warn("[Process] Suppressed network abort:", err.message);
+  } else {
+    console.error("[Process] Uncaught exception:", err);
+  }
+});
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason?.message || String(reason);
+  if (
+    msg.includes("wsarecv") ||
+    msg.includes("stream reading error") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("aborted")
+  ) {
+    console.warn("[Process] Suppressed network abort (rejection):", msg);
+  } else {
+    console.error("[Process] Unhandled rejection:", reason);
+  }
+});
 
 const express = require("express");
 const http = require("http");
 const { WebSocketServer } = require("ws");
-const fs = require("fs"); // Added for debugging
 
 const { dialAgent } = require("./plivoClient");
-const { createSarvamSTT } = require("./sarvamSTT");
-const { createSarvamTTS } = require("./sarvamTTS");
-const { mulawToPcm16k, pcm24kToMulaw } = require("./audioUtils");
+const { ElevenLabsS2S } = require("./elevenLabsS2S");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT = process.env.PORT || 8080;
-const SARVAM_KEY = process.env.SARVAM_API_KEY;
-const SPEAKER =
-  process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
-const LANG = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
+const PORT           = process.env.PORT || 8080;
+const ELEVEN_KEY     = process.env.ELEVEN_LABS_API;
+const ELEVEN_VOICE   = process.env.ELEVEN_LABS_VOICE_ID;
+const ELEVEN_MODEL   = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
+const SILENCE_MS     = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "700", 10);
+const SPEECH_THRESH  = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "200", 10);
+
+if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
+if (!ELEVEN_VOICE) console.warn("[Config] ELEVEN_LABS_VOICE_ID not set");
 
 // ─── Audio Streamer (Jitter Buffer) ──────────────────────────────────────────
 // Plivo prefers steady chunks of audio rather than large burst payloads.
@@ -35,7 +67,7 @@ class AudioStreamer {
     this.queue = Buffer.alloc(0);
     this.timer = null;
     this.chunkSize = 160; // 20ms of 8kHz mulaw
-    this.interval = 20; // 20ms
+    this.interval = 20;   // 20ms
   }
 
   addAudio(mulawBuffer) {
@@ -89,7 +121,7 @@ const server = http.createServer(app);
 
 // Use noServer:true + manual upgrade routing to avoid ws upgrade event
 // conflicts when multiple WebSocketServer instances share the same HTTP server.
-const wss = new WebSocketServer({ noServer: true });
+const wss      = new WebSocketServer({ noServer: true });
 const agentWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
@@ -146,7 +178,7 @@ const sessions = new Map();
 wss.on("connection", (plivoWs) => {
   console.log("\n[WS] ─── New Plivo connection ─────────────────────");
 
-  let callUUID = null;
+  let callUUID  = null;
   let sessionId = null;
 
   plivoWs.on("message", async (raw) => {
@@ -169,14 +201,13 @@ wss.on("connection", (plivoWs) => {
         console.log(`[WS] Call started | UUID: ${callUUID}`);
         console.log(`[WS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
-        // Register the session. agentWs / sttWs / ttsWs will be filled in
+        // Register the session. agentWs / s2s will be filled in
         // later when the agent leg connects (/agent-stream).
         sessions.set(sessionId, {
           customerWs: plivoWs,
-          agentWs: null,
-          sttWs: null,
-          ttsWs: null,
-          streamer: new AudioStreamer(plivoWs, sessionId),
+          agentWs:    null,
+          s2s:        null,
+          streamer:   new AudioStreamer(plivoWs, sessionId),
         });
 
         // Dial the agent once
@@ -235,15 +266,15 @@ wss.on("connection", (plivoWs) => {
 
 // ─── Agent WebSocket Handler (/agent-stream) ──────────────────────────────────
 // Handles the agent's phone audio.
-// Agent inbound audio ──► Sarvam STT ──► transcript ──► Sarvam TTS (Priya) ──► customer
+// Agent inbound audio ──► ElevenLabs S2S ──► ulaw_8000 ──► customer
 // Does NOT call dialAgent() — that would cause an infinite loop.
 
 agentWss.on("connection", (agentWs, req) => {
   console.log("[AgentWS] ─── Agent leg connected ──────────────────");
 
-  const url = new URL(req.url, "http://localhost");
+  const url       = new URL(req.url, "http://localhost");
   const sessionId = url.searchParams.get("sessionId");
-  const session = sessions.get(sessionId);
+  const session   = sessions.get(sessionId);
 
   if (!session) {
     console.warn(
@@ -256,52 +287,31 @@ agentWss.on("connection", (agentWs, req) => {
   session.agentWs = agentWs;
   console.log(`[AgentWS] Linked to session ${sessionId}`);
 
-  // ── Initialise Sarvam TTS (Priya) ─────────────────────────────────────────
-  // Create TTS first so it's ready when STT produces transcripts.
-  const ttsWs = createSarvamTTS(SARVAM_KEY, SPEAKER, LANG, (pcmBuffer) => {
-    // Sarvam is returning 24kHz linear16 PCM.
-    // We MUST resample to 8kHz locally because Sarvam ignores sample_rate requests via WebSocket.
-    const currentSession = sessions.get(sessionId);
-    if (
-      !currentSession ||
-      !currentSession.customerWs ||
-      currentSession.customerWs.readyState !== 1
-    )
-      return;
-
-    try {
-      // Resample 24000Hz PCM to 8000Hz mu-law locally
-      const mulawBuf = pcm24kToMulaw(pcmBuffer);
-
-      // Queue the resampled mu-law directly into the streamer to avoid bursting Plivo
-      currentSession.streamer.addAudio(mulawBuf);
-
-      if (Math.random() < 0.05)
-        console.log(
-          `[TTS→Customer] Buffered Priya audio to customer (callId: ${sessionId})`,
-        );
-    } catch (err) {
-      console.error("[TTS→Plivo] Error:", err.message);
-    }
-  });
-
-  session.ttsWs = ttsWs;
-
-  // ── Initialise Sarvam STT ──────────────────────────────────────────────────
-  // STT receives agent PCM audio and fires onTranscript on each recognised phrase.
-  const sttWs = createSarvamSTT(SARVAM_KEY, LANG, (transcript, isFinal) => {
-    console.log(`[STT] ${isFinal ? "FINAL" : "partial"}: "${transcript}"`);
-    if (isFinal && transcript.trim().length > 0) {
+  // ── Initialise ElevenLabs S2S ─────────────────────────────────────────────
+  const s2s = new ElevenLabsS2S(
+    ELEVEN_KEY,
+    ELEVEN_VOICE,
+    (ulawChunk) => {
+      // ulaw_8000 bytes arrive directly from ElevenLabs — no resampling needed.
       const currentSession = sessions.get(sessionId);
-      if (currentSession?.ttsWs?.readyState === 1) {
-        currentSession.ttsWs.synthesize(transcript);
-      } else {
-        console.warn("[STT→TTS] TTS not ready, dropping transcript");
-      }
-    }
-  });
+      if (
+        !currentSession ||
+        !currentSession.customerWs ||
+        currentSession.customerWs.readyState !== 1
+      )
+        return;
+      currentSession.streamer.addAudio(ulawChunk);
+      if (Math.random() < 0.05)
+        console.log(`[S2S→Customer] Buffered modulated audio (callId: ${sessionId})`);
+    },
+    {
+      silenceDurationMs: SILENCE_MS,
+      speechThreshold:   SPEECH_THRESH,
+      modelId:           ELEVEN_MODEL,
+    },
+  );
 
-  session.sttWs = sttWs;
+  session.s2s = s2s;
 
   // ── Agent media messages ───────────────────────────────────────────────────
   agentWs.on("message", (raw) => {
@@ -322,21 +332,15 @@ agentWss.on("connection", (agentWs, req) => {
       if (!payload) return;
 
       // 'inbound' = audio coming FROM the agent's phone (what the agent speaks).
-      // Send raw PCM to STT so we can recognise and re-speak in Priya's voice.
+      // Feed raw mu-law directly into S2S — no conversion needed at this stage.
       if (track === "inbound") {
         const currentSession = sessions.get(sessionId);
-        if (currentSession?.sttWs?.readyState === 1) {
+        if (currentSession?.s2s) {
           try {
-            const pcmBuf = mulawToPcm16k(Buffer.from(payload, "base64"));
-            // sendAudio() wraps PCM in { event:"audio_input", audio:<base64> } JSON
-            // which is what Sarvam saaras:v3-realtime expects (NOT raw binary frames)
-            currentSession.sttWs.sendAudio(pcmBuf);
-            if (Math.random() < 0.05)
-              console.log(
-                `[Agent→STT] Routed agent audio to Sarvam STT (callId: ${sessionId})`,
-              );
+            const mulawBuf = Buffer.from(payload, "base64");
+            currentSession.s2s.addAudio(mulawBuf);
           } catch (err) {
-            console.error("[Agent→STT] Conversion error:", err.message);
+            console.error("[Agent→S2S] Error:", err.message);
           }
         }
       }
@@ -345,8 +349,7 @@ agentWss.on("connection", (agentWs, req) => {
 
   agentWs.on("close", (code) => {
     console.log(`[AgentWS] Closed (code=${code})`);
-    // Close Sarvam connections tied to this agent leg
-    cleanupSarvam(sessionId);
+    cleanupElevenLabs(sessionId);
     if (session) session.agentWs = null;
   });
 
@@ -356,21 +359,17 @@ agentWss.on("connection", (agentWs, req) => {
 // ─── Cleanup Helpers ──────────────────────────────────────────────────────────
 
 /**
- * Close Sarvam STT + TTS connections for a session without deleting the session.
+ * Destroy ElevenLabs S2S processor for a session without deleting the session.
  * Called when the agent leg drops (customer may still be on hold).
  */
-function cleanupSarvam(sessionId) {
+function cleanupElevenLabs(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
   try {
-    session.sttWs?.close();
-  } catch {}
-  try {
-    session.ttsWs?.close();
+    session.s2s?.destroy();
   } catch {}
   if (session.streamer) session.streamer.stop();
-  session.sttWs = null;
-  session.ttsWs = null;
+  session.s2s = null;
 }
 
 /**
@@ -378,7 +377,7 @@ function cleanupSarvam(sessionId) {
  */
 function cleanupSession(sessionId) {
   if (!sessionId) return;
-  cleanupSarvam(sessionId);
+  cleanupElevenLabs(sessionId);
   sessions.delete(sessionId);
   console.log(`[Cleanup] Session ${sessionId} removed`);
 }
@@ -392,7 +391,7 @@ server.listen(PORT, () => {
   console.log(`║   HTTP : http://localhost:${PORT}          ║`);
   console.log(`║   WS   : ws://localhost:${PORT}/stream     ║`);
   console.log(`║   WS   : ws://localhost:${PORT}/agent-stream ║`);
-  console.log(`║   Voice: ${SPEAKER} (${LANG})          ║`);
+  console.log(`║   Voice: ElevenLabs ${ELEVEN_VOICE?.slice(0, 12)}…  ║`);
   console.log("╚══════════════════════════════════════════╝");
   console.log("");
 });

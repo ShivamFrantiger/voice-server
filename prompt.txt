@@ -1,0 +1,12 @@
+Plan this throughly before implementing
+
+So this is what i want to create
+A voice modulation call system where there are 2 phones and 3 numebrs
+
+client from his phone and number calls a plivo number
+the plivo number redirects to my phone and number
+
+and i can pick up the call and talk to client directly
+now when client speaks his normal voice comes to me
+but when i speak a modulated voice should come
+
