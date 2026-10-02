@@ -93,4 +93,4 @@ function mulawToWav16k(mulawBuffer) {
   return Buffer.from(wav.toBuffer());
 }
 
-module.exports = { mulawToPcm16k, pcm24kToMulaw, pcm8kToMulaw, mulawToWav8k, mulawToWav16k, hasWavHeader, stripWavHeader };
+module.exports = { mulawToPcm16k, pcm24kToMulaw, pcm8kToMulaw, mulawToWav16k, hasWavHeader, stripWavHeader };
