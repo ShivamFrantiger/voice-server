@@ -338,9 +338,7 @@ agentWss.on("connection", (agentWs, req) => {
         if (currentSession?.s2s) {
           try {
             const mulawBuf = Buffer.from(payload, "base64");
-            currentSession.s2s.addAudio(mulawBuf).catch(err => {
-              console.error("[Agent→S2S] Stream error:", err.message);
-            });
+            currentSession.s2s.addAudio(mulawBuf);
           } catch (err) {
             console.error("[Agent→S2S] Error:", err.message);
           }
