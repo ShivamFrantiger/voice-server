@@ -45,7 +45,11 @@ class ElevenLabsS2S {
   _connect() {
     return new Promise((resolve, reject) => {
       const url = `wss://api.elevenlabs.io/v1/speech-to-speech/${this.voiceId}/stream-input?model_id=${this.modelId}&output_format=ulaw_8000`;
-      this.ws = new WebSocket(url);
+      this.ws = new WebSocket(url, {
+        headers: {
+          'xi-api-key': this.apiKey
+        }
+      });
 
       this.ws.on('open', () => {
         console.log(`[S2S WS] Connected to ElevenLabs | Voice: ${this.voiceId}`);
