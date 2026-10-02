@@ -198,9 +198,9 @@ class ElevenLabsS2S {
     form.append(
       "voice_settings",
       JSON.stringify({
-        stability: 0.3,
+        stability: 0.6,
         similarity_boost: 1.0,
-        style: 0.3,
+        style: 0,
         use_speaker_boost: true,
       }),
     );
