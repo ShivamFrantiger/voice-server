@@ -12,17 +12,12 @@ function mulawToPcm16k(mulawBuffer) {
   const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
   const pcm8k = alawmulaw.mulaw.decode(uint8); // Int16Array, 8kHz
 
-  // Upsample 8kHz → 16kHz via linear interpolation
-  const pcm16k = new Int16Array(pcm8k.length * 2);
-  for (let i = 0; i < pcm8k.length; i++) {
-    pcm16k[i * 2] = pcm8k[i];
-    if (i < pcm8k.length - 1) {
-      pcm16k[i * 2 + 1] = Math.round((pcm8k[i] + pcm8k[i + 1]) / 2);
-    } else {
-      pcm16k[i * 2 + 1] = pcm8k[i];
-    }
-  }
-
+  // Upsample 8kHz → 16kHz via wavefile resampler
+  const wav = new WaveFile();
+  wav.fromScratch(1, 8000, '16', pcm8k);
+  wav.toSampleRate(16000);
+  
+  const pcm16k = wav.getSamples(false, Int16Array);
   return Buffer.from(pcm16k.buffer);
 }
 
@@ -80,18 +75,22 @@ function pcm8kToMulaw(pcmBuffer) {
 }
 
 /**
- * Convert raw μ-law 8kHz Buffer → 8kHz PCM16 WAV Buffer (for ElevenLabs S2S input).
- * ElevenLabs accepts standard PCM WAV natively.
+ * Convert raw μ-law 8kHz Buffer → 16kHz PCM16 WAV Buffer (for ElevenLabs S2S input).
+ * ElevenLabs works better with 16kHz+ audio.
  *
  * @param {Buffer} mulawBuffer - raw μ-law bytes from Plivo
- * @returns {Buffer}           - WAV file (PCM16 @ 8kHz, mono)
+ * @returns {Buffer}           - WAV file (PCM16 @ 16kHz, mono)
  */
-function mulawToWav8k(mulawBuffer) {
+function mulawToWav16k(mulawBuffer) {
   const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
   const pcm8k = alawmulaw.mulaw.decode(uint8); // Int16Array @ 8kHz
+  
+  // Upsample 8kHz → 16kHz via wavefile resampler
   const wav = new WaveFile();
   wav.fromScratch(1, 8000, '16', pcm8k);
+  wav.toSampleRate(16000);
+
   return Buffer.from(wav.toBuffer());
 }
 
-module.exports = { mulawToPcm16k, pcm24kToMulaw, pcm8kToMulaw, mulawToWav8k, hasWavHeader, stripWavHeader };
+module.exports = { mulawToPcm16k, pcm24kToMulaw, pcm8kToMulaw, mulawToWav8k, mulawToWav16k, hasWavHeader, stripWavHeader };

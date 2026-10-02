@@ -1,4 +1,4 @@
-﻿// server.js — Voice Modulation Server
+// server.js — Voice Modulation Server
 // Bridges Plivo WebSocket streaming with ElevenLabs Speech-to-Speech
 // to convert the agent voice before sending to the customer.
 //
@@ -52,7 +52,7 @@ const PORT           = process.env.PORT || 8080;
 const ELEVEN_KEY     = process.env.ELEVEN_LABS_API;
 const ELEVEN_VOICE   = process.env.ELEVEN_LABS_VOICE_ID;
 const ELEVEN_MODEL   = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS     = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "700", 10);
+const SILENCE_MS     = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "300", 10);
 const SPEECH_THRESH  = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "200", 10);
 
 if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
@@ -338,7 +338,9 @@ agentWss.on("connection", (agentWs, req) => {
         if (currentSession?.s2s) {
           try {
             const mulawBuf = Buffer.from(payload, "base64");
-            currentSession.s2s.addAudio(mulawBuf);
+            currentSession.s2s.addAudio(mulawBuf).catch(err => {
+              console.error("[Agent→S2S] Stream error:", err.message);
+            });
           } catch (err) {
             console.error("[Agent→S2S] Error:", err.message);
           }
