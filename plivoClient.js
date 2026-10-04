@@ -1,5 +1,5 @@
 // plivoClient.js
-// Plivo REST API wrapper — dials the agent's phone as a second call leg
+// Plivo REST API wrapper — dials the client's phone as a second call leg
 
 const plivo = require('plivo');
 
@@ -9,17 +9,23 @@ const client = new plivo.Client(
 );
 
 /**
- * Dials the agent's phone number.
- * When the agent answers, Plivo hits AGENT_ANSWER_URL which returns
- * a <Stream> XML so voice-server can receive the agent's audio.
+ * Dials the client's phone number dynamically.
+ * When the client answers, Plivo hits CLIENT_ANSWER_URL which returns
+ * a <Stream> XML so voice-server can receive the client's audio.
  *
- * @returns {Promise<object>} Plivo call response
+ * @param {string} sessionId   - session UUID (appended to answerUrl as query param)
+ * @param {string} toNumber    - client's phone number to dial (E.164 format)
+ * @returns {Promise<object>}  - Plivo call response
  */
-async function dialAgent(sessionId) {
+async function dialClient(sessionId, toNumber) {
   const from = process.env.PLIVO_FROM_NUMBER;
-  const to   = process.env.AGENT_PHONE_NUMBER;
-  
-  let answerUrl = process.env.AGENT_ANSWER_URL;
+  const to   = toNumber;
+
+  let answerUrl = process.env.CLIENT_ANSWER_URL;
+  if (!answerUrl) {
+    throw new Error('CLIENT_ANSWER_URL env var is not set');
+  }
+
   if (sessionId) {
     try {
       const url = new URL(answerUrl);
@@ -30,7 +36,7 @@ async function dialAgent(sessionId) {
     }
   }
 
-  console.log(`[Plivo] Dialing agent: ${from} → ${to}`);
+  console.log(`[Plivo] Dialing client: ${from} → ${to}`);
 
   const response = await client.calls.create(
     from,
@@ -45,4 +51,4 @@ async function dialAgent(sessionId) {
   return response;
 }
 
-module.exports = { dialAgent };
+module.exports = { dialClient };

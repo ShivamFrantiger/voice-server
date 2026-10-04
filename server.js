@@ -1,17 +1,14 @@
-// server.js — Voice Modulation Server
-// Bridges Plivo WebSocket streaming with ElevenLabs Speech-to-Speech
-// to convert the agent voice before sending to the customer.
+﻿// server.js — Voice Modulation Server (Inverted Flow)
+// I call Plivo → server dials the client dynamically → my voice is modulated → client hears fake voice
+// Client speaks → raw audio passed through → I hear real client voice
 //
 // Flow:
-//   Customer  ──inbound──► /stream   ──────────────────────────────► AgentWS  (raw, no mod)
-//   AgentWS   ──inbound──► /agent-stream → ElevenLabs S2S → ulaw_8000 → CustomerWS
+//   MY Phone ──inbound──► /stream   ──► ElevenLabs S2S ──► modulated ulaw ──► ClientWS
+//   ClientWS  ──inbound──► /client-stream ──► raw passthrough ──► MY Phone WS
 
 require("dotenv").config();
 
 // ─── Process-level guards ─────────────────────────────────────────────────────
-// Windows wsarecv TCP abort errors from dropped WebSocket connections
-// surface as unhandled rejections or uncaught exceptions.
-// Log them and keep the server alive rather than crashing.
 process.on("uncaughtException", (err) => {
   if (
     err.code === "ECONNRESET" ||
@@ -40,52 +37,66 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const express = require("express");
-const http = require("http");
+const http    = require("http");
 const { WebSocketServer } = require("ws");
 
-const { dialAgent } = require("./plivoClient");
+const { dialClient } = require("./plivoClient");
 const { ElevenLabsS2S } = require("./elevenLabsS2S");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT           = process.env.PORT || 8080;
-const ELEVEN_KEY     = process.env.ELEVEN_LABS_API;
-const ELEVEN_VOICE   = process.env.ELEVEN_LABS_VOICE_ID;
-const ELEVEN_MODEL   = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS     = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "300", 10);
-const SPEECH_THRESH  = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "200", 10);
+const PORT          = process.env.PORT || 8080;
+const ELEVEN_KEY    = process.env.ELEVEN_LABS_API;
+const ELEVEN_VOICE  = process.env.ELEVEN_LABS_VOICE_ID;
+const ELEVEN_MODEL  = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
+const SILENCE_MS    = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "300", 10);
+const SPEECH_THRESH = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "200", 10);
+const MY_NUMBER     = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
 
 if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
 if (!ELEVEN_VOICE) console.warn("[Config] ELEVEN_LABS_VOICE_ID not set");
+if (!MY_NUMBER)    console.warn("[Config] MY_PHONE_NUMBER not set — caller validation disabled");
+
+// ─── In-memory stores ─────────────────────────────────────────────────────────
+
+/**
+ * pendingCalls: keyed by my phone number (normalised) → target client number.
+ * Set via POST /api/prepare-call from the VoiceModulator web UI.
+ * Cleared once the call is initiated or after TTL.
+ */
+const pendingCalls   = new Map();
+const PENDING_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
+
+/**
+ * sessions: keyed by callUUID (sessionId).
+ * { myWs, clientWs, s2s, streamer, clientNumber }
+ */
+const sessions = new Map();
 
 // ─── Audio Streamer (Jitter Buffer) ──────────────────────────────────────────
-// Plivo prefers steady chunks of audio rather than large burst payloads.
 class AudioStreamer {
-  constructor(ws, sessionId) {
-    this.ws = ws;
+  constructor(ws, sessionId, label) {
+    this.ws        = ws;
     this.sessionId = sessionId;
-    this.queue = Buffer.alloc(0);
-    this.timer = null;
-    this.chunkSize = 160; // 20ms of 8kHz mulaw
-    this.interval = 20;   // 20ms
+    this.label     = label || "audio";
+    this.queue     = Buffer.alloc(0);
+    this.timer     = null;
+    this.chunkSize = 160;
+    this.interval  = 20;
   }
 
   addAudio(mulawBuffer) {
     this.queue = Buffer.concat([this.queue, mulawBuffer]);
-    if (!this.timer) {
-      this.startStreaming();
-    }
+    if (!this.timer) this.startStreaming();
   }
 
   startStreaming() {
     this.timer = setInterval(() => {
       if (this.queue.length >= this.chunkSize) {
         const chunk = this.queue.subarray(0, this.chunkSize);
-        this.queue = this.queue.subarray(this.chunkSize);
+        this.queue  = this.queue.subarray(this.chunkSize);
         this.sendChunk(chunk);
-      } else if (this.queue.length > 0) {
-        // Optional: drain the last tiny bit, but usually we just wait for more.
-      } else {
+      } else if (this.queue.length === 0) {
         clearInterval(this.timer);
         this.timer = null;
       }
@@ -93,7 +104,7 @@ class AudioStreamer {
   }
 
   sendChunk(chunk) {
-    if (this.ws.readyState === 1) {
+    if (this.ws && this.ws.readyState === 1) {
       this.ws.send(
         JSON.stringify({
           event: "playAudio",
@@ -114,25 +125,34 @@ class AudioStreamer {
   }
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function normaliseNumber(num) {
+  return (num || "").replace(/[\s\-()]/g, "").replace(/^\+/, "");
+}
+
+function isTrustedCaller(fromNumber) {
+  if (!MY_NUMBER) return true;
+  return normaliseNumber(fromNumber) === normaliseNumber(MY_NUMBER);
+}
+
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
 
-// Use noServer:true + manual upgrade routing to avoid ws upgrade event
-// conflicts when multiple WebSocketServer instances share the same HTTP server.
-const wss      = new WebSocketServer({ noServer: true });
-const agentWss = new WebSocketServer({ noServer: true });
+const myWss     = new WebSocketServer({ noServer: true });
+const clientWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const pathname = new URL(req.url, "http://localhost").pathname;
   if (pathname === "/stream") {
-    wss.handleUpgrade(req, socket, head, (ws) =>
-      wss.emit("connection", ws, req),
+    myWss.handleUpgrade(req, socket, head, (ws) =>
+      myWss.emit("connection", ws, req),
     );
-  } else if (pathname === "/agent-stream") {
-    agentWss.handleUpgrade(req, socket, head, (ws) =>
-      agentWss.emit("connection", ws, req),
+  } else if (pathname === "/client-stream") {
+    clientWss.handleUpgrade(req, socket, head, (ws) =>
+      clientWss.emit("connection", ws, req),
     );
   } else {
     socket.destroy();
@@ -144,16 +164,79 @@ app.use(express.urlencoded({ extended: true }));
 
 // ─── HTTP Routes ─────────────────────────────────────────────────────────────
 
-// Health check
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "Voice modulation server is running" });
+  res.json({
+    status:       "ok",
+    message:      "Voice modulation server (inverted flow) is running",
+    pendingCalls: pendingCalls.size,
+    activeCalls:  sessions.size,
+  });
 });
 
-// Plivo hits this when the agent picks up.
-// Returns XML pointing to /agent-stream (NOT /stream, to avoid re-triggering dialAgent).
-app.post("/api/plivo/agent-answer", (req, res) => {
+/**
+ * POST /api/prepare-call
+ * Called by VoiceModulator web UI before I dial the Plivo number.
+ * Body: { clientNumber: "+91XXXXXXXXXX" }
+ */
+app.post("/api/prepare-call", (req, res) => {
+  const { clientNumber } = req.body;
+
+  if (!clientNumber || clientNumber.trim().length < 5) {
+    return res.status(400).json({ error: "clientNumber is required" });
+  }
+
+  const myNum = normaliseNumber(MY_NUMBER || "agent");
+  const now   = Date.now();
+
+  for (const [key, val] of pendingCalls.entries()) {
+    if (now - val.createdAt > PENDING_TTL_MS) pendingCalls.delete(key);
+  }
+
+  pendingCalls.set(myNum, { clientNumber: clientNumber.trim(), createdAt: now });
+  console.log(`[PrepareCall] Registered: ${myNum} → ${clientNumber.trim()}`);
+
+  return res.json({
+    success:      true,
+    message:      "Ready. Now dial the Plivo number from your phone.",
+    clientNumber: clientNumber.trim(),
+    expiresInMs:  PENDING_TTL_MS,
+  });
+});
+
+/** GET /api/prepare-call/status */
+app.get("/api/prepare-call/status", (req, res) => {
+  const myNum  = normaliseNumber(MY_NUMBER || "agent");
+  const entry  = pendingCalls.get(myNum);
+  const active = sessions.size;
+
+  if (!entry || Date.now() - entry.createdAt > PENDING_TTL_MS) {
+    return res.json({ pending: false, activeCalls: active });
+  }
+
+  return res.json({
+    pending:      true,
+    clientNumber: entry.clientNumber,
+    activeCalls:  active,
+    expiresInMs:  PENDING_TTL_MS - (Date.now() - entry.createdAt),
+  });
+});
+
+/** POST /api/prepare-call/cancel */
+app.post("/api/prepare-call/cancel", (req, res) => {
+  const myNum = normaliseNumber(MY_NUMBER || "agent");
+  const had   = pendingCalls.has(myNum);
+  pendingCalls.delete(myNum);
+  return res.json({ success: true, wasPending: had });
+});
+
+/**
+ * POST /api/plivo/client-answer
+ * Plivo hits this when the client picks up the outbound call.
+ * Returns XML pointing to /client-stream WS.
+ */
+app.post("/api/plivo/client-answer", (req, res) => {
   const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
-  let wsUrl = serverUrl.replace(/^https?/, "wss") + "/agent-stream";
+  let wsUrl = serverUrl.replace(/^https?/, "wss") + "/client-stream";
 
   if (req.query.sessionId) {
     wsUrl += `?sessionId=${req.query.sessionId}`;
@@ -170,139 +253,137 @@ app.post("/api/plivo/agent-answer", (req, res) => {
   res.send(xml);
 });
 
-// ─── Customer WebSocket Handler (/stream) ─────────────────────────────────────
-// Handles the incoming call from the customer's phone.
+// ─── MY Phone WebSocket Handler (/stream) ─────────────────────────────────────
+// I dial the Plivo number → Plivo opens this WS for MY audio.
+// MY inbound audio → ElevenLabs S2S → modulated ulaw → client phone
+// Client audio (via /client-stream) → raw passthrough → MY phone (this WS)
 
-const sessions = new Map();
-
-wss.on("connection", (plivoWs) => {
-  console.log("\n[WS] ─── New Plivo connection ─────────────────────");
+myWss.on("connection", (myWs) => {
+  console.log("\n[MyWS] ─── New call from MY phone ─────────────────────");
 
   let callUUID  = null;
   let sessionId = null;
 
-  plivoWs.on("message", async (raw) => {
+  myWs.on("message", async (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     switch (msg.event) {
-      // ── start ─────────────────────────────────────────────────────────────
       case "start": {
-        callUUID =
-          msg.start?.callId ||
-          msg.start?.callUUID ||
-          msg.start?.call_uuid ||
-          "unknown";
+        callUUID  = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid || "unknown";
         sessionId = callUUID;
-        console.log(`[WS] Call started | UUID: ${callUUID}`);
-        console.log(`[WS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
-        // Register the session. agentWs / s2s will be filled in
-        // later when the agent leg connects (/agent-stream).
+        const fromNumber = msg.start?.from || msg.start?.callerName || "";
+        console.log(`[MyWS] Call started | UUID: ${callUUID} | from: ${fromNumber}`);
+        console.log(`[MyWS] Metadata:`, JSON.stringify(msg.start, null, 2));
+
+        if (!isTrustedCaller(fromNumber)) {
+          console.warn(`[MyWS] Untrusted caller ${fromNumber} — rejecting`);
+          myWs.close();
+          return;
+        }
+
+        const myNum   = normaliseNumber(MY_NUMBER || "agent");
+        const pending = pendingCalls.get(myNum);
+
+        if (!pending || Date.now() - pending.createdAt > PENDING_TTL_MS) {
+          console.warn("[MyWS] No pending client number registered — hanging up");
+          myWs.close();
+          return;
+        }
+
+        const clientNumber = pending.clientNumber;
+        pendingCalls.delete(myNum);
+
         sessions.set(sessionId, {
-          customerWs: plivoWs,
-          agentWs:    null,
-          s2s:        null,
-          streamer:   new AudioStreamer(plivoWs, sessionId),
+          myWs,
+          clientWs:    null,
+          s2s:         null,
+          streamer:    new AudioStreamer(null, sessionId, "client"),
+          clientNumber,
         });
 
-        // Dial the agent once
+        console.log(`[MyWS] Will dial client: ${clientNumber}`);
+
         try {
-          await dialAgent(sessionId);
+          await dialClient(sessionId, clientNumber);
         } catch (err) {
-          console.error("[Plivo] Failed to dial agent:", err.message);
+          console.error("[Plivo] Failed to dial client:", err.message);
+          cleanupSession(sessionId);
         }
         break;
       }
 
-      // ── media ─────────────────────────────────────────────────────────────
-      // Customer audio → forward raw (unmodified) to agent so they can hear.
       case "media": {
         const { track, payload } = msg.media || {};
         if (!payload) break;
 
+        // MY voice (inbound from my phone) → feed to ElevenLabs S2S → modulated → client
         if (track === "inbound") {
           const session = sessions.get(sessionId);
-          if (session && session.agentWs && session.agentWs.readyState === 1) {
-            session.agentWs.send(
-              JSON.stringify({
-                event: "playAudio",
-                media: {
-                  contentType: "audio/x-mulaw",
-                  sampleRate: 8000,
-                  payload,
-                },
-              }),
-            );
-            if (Math.random() < 0.05)
-              console.log(
-                `[Router] Routed customer audio → AgentWS (callId: ${sessionId})`,
-              );
+          if (session?.s2s) {
+            try {
+              const mulawBuf = Buffer.from(payload, "base64");
+              session.s2s.addAudio(mulawBuf);
+            } catch (err) {
+              console.error("[MyWS→S2S] Error:", err.message);
+            }
           }
         }
         break;
       }
 
-      // ── stop ──────────────────────────────────────────────────────────────
       case "stop": {
-        console.log(`[WS] Call stopped | UUID: ${callUUID}`);
+        console.log(`[MyWS] Call stopped | UUID: ${callUUID}`);
         cleanupSession(sessionId);
         break;
       }
     }
   });
 
-  plivoWs.on("close", (code) => {
-    console.log(`[WS] Connection closed (code=${code}) | UUID: ${callUUID}`);
+  myWs.on("close", (code) => {
+    console.log(`[MyWS] Connection closed (code=${code}) | UUID: ${callUUID}`);
     cleanupSession(sessionId);
   });
 
-  plivoWs.on("error", (err) => console.error("[WS] Error:", err.message));
+  myWs.on("error", (err) => console.error("[MyWS] Error:", err.message));
 });
 
-// ─── Agent WebSocket Handler (/agent-stream) ──────────────────────────────────
-// Handles the agent's phone audio.
-// Agent inbound audio ──► ElevenLabs S2S ──► ulaw_8000 ──► customer
-// Does NOT call dialAgent() — that would cause an infinite loop.
+// ─── Client WebSocket Handler (/client-stream) ────────────────────────────────
+// Handles the client's phone audio AFTER I dial them.
+// Client inbound audio → raw passthrough → MY phone (unmodified, I hear real client voice)
 
-agentWss.on("connection", (agentWs, req) => {
-  console.log("[AgentWS] ─── Agent leg connected ──────────────────");
+clientWss.on("connection", (clientWs, req) => {
+  console.log("[ClientWS] ─── Client leg connected ──────────────────");
 
   const url       = new URL(req.url, "http://localhost");
   const sessionId = url.searchParams.get("sessionId");
   const session   = sessions.get(sessionId);
 
   if (!session) {
-    console.warn(
-      `[AgentWS] No active session found for ${sessionId} — closing`,
-    );
-    agentWs.close();
+    console.warn(`[ClientWS] No active session found for ${sessionId} — closing`);
+    clientWs.close();
     return;
   }
 
-  session.agentWs = agentWs;
-  console.log(`[AgentWS] Linked to session ${sessionId}`);
+  session.clientWs = clientWs;
+  console.log(`[ClientWS] Linked to session ${sessionId} | client: ${session.clientNumber}`);
 
-  // ── Initialise ElevenLabs S2S ─────────────────────────────────────────────
+  // Initialise ElevenLabs S2S — processes MY voice → modulated audio → plays to client
   const s2s = new ElevenLabsS2S(
     ELEVEN_KEY,
     ELEVEN_VOICE,
     (ulawChunk) => {
-      // ulaw_8000 bytes arrive directly from ElevenLabs — no resampling needed.
-      const currentSession = sessions.get(sessionId);
-      if (
-        !currentSession ||
-        !currentSession.customerWs ||
-        currentSession.customerWs.readyState !== 1
-      )
-        return;
-      currentSession.streamer.addAudio(ulawChunk);
+      const cur = sessions.get(sessionId);
+      if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
+
+      if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
+        cur.streamer.ws = cur.clientWs;
+      }
+      cur.streamer.addAudio(ulawChunk);
+
       if (Math.random() < 0.05)
-        console.log(`[S2S→Customer] Buffered modulated audio (callId: ${sessionId})`);
+        console.log(`[S2S→Client] Buffered modulated audio (session: ${sessionId})`);
     },
     {
       silenceDurationMs: SILENCE_MS,
@@ -311,70 +392,63 @@ agentWss.on("connection", (agentWs, req) => {
     },
   );
 
+  session.streamer.ws = clientWs;
   session.s2s = s2s;
 
-  // ── Agent media messages ───────────────────────────────────────────────────
-  agentWs.on("message", (raw) => {
+  clientWs.on("message", (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.event === "start") {
       console.log(
-        "[AgentWS] Agent call started | UUID:",
+        "[ClientWS] Client call started | UUID:",
         msg.start?.callId || msg.start?.callUUID || "unknown",
       );
     } else if (msg.event === "media") {
       const { track, payload } = msg.media || {};
       if (!payload) return;
 
-      // 'inbound' = audio coming FROM the agent's phone (what the agent speaks).
-      // Feed raw mu-law directly into S2S — no conversion needed at this stage.
+      // Client inbound audio → raw passthrough → MY phone (I hear client's real voice)
       if (track === "inbound") {
-        const currentSession = sessions.get(sessionId);
-        if (currentSession?.s2s) {
-          try {
-            const mulawBuf = Buffer.from(payload, "base64");
-            currentSession.s2s.addAudio(mulawBuf);
-          } catch (err) {
-            console.error("[Agent→S2S] Error:", err.message);
-          }
+        const cur = sessions.get(sessionId);
+        if (cur?.myWs && cur.myWs.readyState === 1) {
+          cur.myWs.send(
+            JSON.stringify({
+              event: "playAudio",
+              media: {
+                contentType: "audio/x-mulaw",
+                sampleRate: 8000,
+                payload,
+              },
+            }),
+          );
+          if (Math.random() < 0.05)
+            console.log(`[Router] Client audio → MyWS raw passthrough (session: ${sessionId})`);
         }
       }
     }
   });
 
-  agentWs.on("close", (code) => {
-    console.log(`[AgentWS] Closed (code=${code})`);
+  clientWs.on("close", (code) => {
+    console.log(`[ClientWS] Closed (code=${code})`);
     cleanupElevenLabs(sessionId);
-    if (session) session.agentWs = null;
+    const cur = sessions.get(sessionId);
+    if (cur) cur.clientWs = null;
   });
 
-  agentWs.on("error", (err) => console.error("[AgentWS] Error:", err.message));
+  clientWs.on("error", (err) => console.error("[ClientWS] Error:", err.message));
 });
 
 // ─── Cleanup Helpers ──────────────────────────────────────────────────────────
 
-/**
- * Destroy ElevenLabs S2S processor for a session without deleting the session.
- * Called when the agent leg drops (customer may still be on hold).
- */
 function cleanupElevenLabs(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
-  try {
-    session.s2s?.destroy();
-  } catch {}
+  try { session.s2s?.destroy(); } catch {}
   if (session.streamer) session.streamer.stop();
   session.s2s = null;
 }
 
-/**
- * Full session teardown. Called when the customer call ends.
- */
 function cleanupSession(sessionId) {
   if (!sessionId) return;
   cleanupElevenLabs(sessionId);
@@ -387,11 +461,12 @@ function cleanupSession(sessionId) {
 server.listen(PORT, () => {
   console.log("");
   console.log("╔══════════════════════════════════════════╗");
-  console.log("║       Voice Modulation Server            ║");
+  console.log("║   Voice Modulation Server (Inverted)     ║");
   console.log(`║   HTTP : http://localhost:${PORT}          ║`);
   console.log(`║   WS   : ws://localhost:${PORT}/stream     ║`);
-  console.log(`║   WS   : ws://localhost:${PORT}/agent-stream ║`);
-  console.log(`║   Voice: ElevenLabs ${ELEVEN_VOICE?.slice(0, 12)}…  ║`);
+  console.log(`║   WS   : ws://localhost:${PORT}/client-stream ║`);
+  console.log(`║   Voice: ElevenLabs ${ELEVEN_VOICE?.slice(0, 12)}...  ║`);
+  console.log(`║   My # : ${MY_NUMBER || "NOT SET"}  ║`);
   console.log("╚══════════════════════════════════════════╝");
   console.log("");
 });
