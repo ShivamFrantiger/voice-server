@@ -40,7 +40,7 @@ const express = require("express");
 const http    = require("http");
 const { WebSocketServer } = require("ws");
 
-const { dialClient } = require("./plivoClient");
+const { dialClient, hangupCall } = require("./plivoClient");
 const { ElevenLabsS2S } = require("./elevenLabsS2S");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -281,12 +281,33 @@ app.get("/api/prepare-call/status", (req, res) => {
   });
 });
 
-/** POST /api/prepare-call/cancel */
+/** POST /api/prepare-call/cancel & POST /api/end-call */
+const terminateActiveCalls = () => {
+  pendingCalls.clear();
+  let endedCount = 0;
+  for (const [sessionId, session] of sessions.entries()) {
+    endedCount++;
+    if (session.myCallUuid) hangupCall(session.myCallUuid);
+    if (session.clientCallUuid) hangupCall(session.clientCallUuid);
+
+    try { if (session.myWs && session.myWs.readyState === 1) session.myWs.close(); } catch {}
+    try { if (session.clientWs && session.clientWs.readyState === 1) session.clientWs.close(); } catch {}
+
+    cleanupSession(sessionId);
+  }
+  return endedCount;
+};
+
+app.post("/api/end-call", (req, res) => {
+  console.log("[EndCall] Terminating all active call legs and pending registrations...");
+  const endedCount = terminateActiveCalls();
+  return res.json({ success: true, message: `Ended ${endedCount} active calls`, endedCount });
+});
+
 app.post("/api/prepare-call/cancel", (req, res) => {
-  const myNum = normaliseNumber(MY_NUMBER || "agent");
-  const had   = pendingCalls.has(myNum);
-  pendingCalls.delete(myNum);
-  return res.json({ success: true, wasPending: had });
+  console.log("[CancelCall] Terminating pending calls and active call legs...");
+  const endedCount = terminateActiveCalls();
+  return res.json({ success: true, endedCount });
 });
 
 /**
@@ -422,16 +443,22 @@ myWss.on("connection", (myWs, req) => {
 
         sessions.set(sessionId, {
           myWs,
-          clientWs:    null,
-          s2s:         null,
-          streamer:    new AudioStreamer(null, sessionId, "client"),
+          clientWs:       null,
+          s2s:            null,
+          streamer:       new AudioStreamer(null, sessionId, "client"),
           clientNumber,
+          myCallUuid:     callUUID,
+          clientCallUuid: null,
         });
 
         console.log(`[MyWS] Will dial client: ${clientNumber}`);
 
         try {
-          await dialClient(sessionId, clientNumber);
+          const resp = await dialClient(sessionId, clientNumber);
+          const currentSession = sessions.get(sessionId);
+          if (currentSession && resp) {
+            currentSession.clientCallUuid = resp.requestUuid || resp.callUuid || null;
+          }
         } catch (err) {
           console.error("[Plivo] Failed to dial client:", err.message);
           cleanupSession(sessionId);
@@ -525,9 +552,13 @@ clientWss.on("connection", (clientWs, req) => {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.event === "start") {
+      const clientUuid = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid;
+      if (clientUuid && session) {
+        session.clientCallUuid = clientUuid;
+      }
       console.log(
         "[ClientWS] Client call started | UUID:",
-        msg.start?.callId || msg.start?.callUUID || "unknown",
+        clientUuid || "unknown",
       );
     } else if (msg.event === "media") {
       const { track, payload } = msg.media || {};

@@ -51,4 +51,23 @@ async function dialClient(sessionId, toNumber) {
   return response;
 }
 
-module.exports = { dialClient };
+/**
+ * Hangs up an active call leg on Plivo using call UUID.
+ * @param {string} callUuid
+ */
+async function hangupCall(callUuid) {
+  if (!callUuid) return;
+  try {
+    if (typeof client.calls.hangup === 'function') {
+      await client.calls.hangup(callUuid);
+    } else if (typeof client.calls.hangupCall === 'function') {
+      await client.calls.hangupCall(callUuid);
+    }
+    console.log(`[Plivo] Hangup requested for call UUID: ${callUuid}`);
+  } catch (err) {
+    console.error(`[Plivo] Failed to hangup call ${callUuid}:`, err.message || err);
+  }
+}
+
+module.exports = { dialClient, hangupCall };
+
