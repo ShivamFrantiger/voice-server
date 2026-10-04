@@ -1,4 +1,4 @@
-﻿// server.js — Voice Modulation Server (Inverted Flow)
+// server.js — Voice Modulation Server (Inverted Flow)
 // I call Plivo → server dials the client dynamically → my voice is modulated → client hears fake voice
 // Client speaks → raw audio passed through → I hear real client voice
 //
@@ -131,9 +131,68 @@ function normaliseNumber(num) {
   return (num || "").replace(/[\s\-()]/g, "").replace(/^\+/, "");
 }
 
+function numbersMatch(a, b) {
+  const normA = normaliseNumber(a);
+  const normB = normaliseNumber(b);
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+  // Match last 10 digits if both are at least 10 digits
+  if (normA.length >= 10 && normB.length >= 10) {
+    return normA.slice(-10) === normB.slice(-10);
+  }
+  return false;
+}
+
 function isTrustedCaller(fromNumber) {
   if (!MY_NUMBER) return true;
-  return normaliseNumber(fromNumber) === normaliseNumber(MY_NUMBER);
+  if (!fromNumber) return false;
+  return numbersMatch(fromNumber, MY_NUMBER);
+}
+
+function getPendingCall(fromNumber) {
+  const now = Date.now();
+  for (const [key, val] of pendingCalls.entries()) {
+    if (now - val.createdAt > PENDING_TTL_MS) pendingCalls.delete(key);
+  }
+
+  // 1. Try matching with fromNumber
+  if (fromNumber) {
+    const normFrom = normaliseNumber(fromNumber);
+    if (pendingCalls.has(normFrom)) {
+      const entry = pendingCalls.get(normFrom);
+      pendingCalls.delete(normFrom);
+      return entry;
+    }
+    for (const [key, val] of pendingCalls.entries()) {
+      if (numbersMatch(key, normFrom)) {
+        pendingCalls.delete(key);
+        return val;
+      }
+    }
+  }
+
+  // 2. Try matching with configured MY_NUMBER
+  const myNum = normaliseNumber(MY_NUMBER || "agent");
+  if (pendingCalls.has(myNum)) {
+    const entry = pendingCalls.get(myNum);
+    pendingCalls.delete(myNum);
+    return entry;
+  }
+  for (const [key, val] of pendingCalls.entries()) {
+    if (numbersMatch(key, myNum)) {
+      pendingCalls.delete(key);
+      return val;
+    }
+  }
+
+  // 3. Fallback: If only 1 pending call exists and it's fresh
+  if (pendingCalls.size === 1) {
+    const [key, val] = pendingCalls.entries().next().value;
+    pendingCalls.delete(key);
+    return val;
+  }
+
+  return null;
 }
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
@@ -230,6 +289,43 @@ app.post("/api/prepare-call/cancel", (req, res) => {
 });
 
 /**
+ * GET/POST /api/plivo/answer
+ * Direct Plivo answer URL fallback on voice-server.
+ * Returns XML pointing to /stream WS with caller query params.
+ */
+app.all("/api/plivo/answer", (req, res) => {
+  const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
+  let wsUrl = serverUrl.replace(/^https?/, "wss") + "/stream";
+
+  const fromNumber = req.body?.From || req.body?.from || req.query?.From || req.query?.from || "";
+  const callUUID   = req.body?.CallUUID || req.body?.callUUID || req.query?.CallUUID || req.query?.callUUID || "";
+  const toNumber   = req.body?.To || req.body?.to || req.query?.To || req.query?.to || "";
+
+  try {
+    const urlObj = new URL(wsUrl);
+    if (fromNumber) urlObj.searchParams.set("from", fromNumber);
+    if (callUUID)   urlObj.searchParams.set("callUUID", callUUID);
+    if (toNumber)   urlObj.searchParams.set("to", toNumber);
+    wsUrl = urlObj.toString();
+  } catch (_) {
+    if (fromNumber) wsUrl += (wsUrl.includes("?") ? "&" : "?") + `from=${encodeURIComponent(fromNumber)}`;
+  }
+
+  const escapedWsUrl = wsUrl.replace(/&/g, "&amp;");
+  const extraHeadersAttr = fromNumber ? ` extraHeaders="from:${fromNumber}"` : "";
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream streamTimeout="86400" keepCallAlive="true" bidirectional="true" contentType="audio/x-mulaw;rate=8000"${extraHeadersAttr}>
+    ${escapedWsUrl}
+  </Stream>
+</Response>`;
+
+  res.set("Content-Type", "text/xml");
+  res.send(xml);
+});
+
+/**
  * POST /api/plivo/client-answer
  * Plivo hits this when the client picks up the outbound call.
  * Returns XML pointing to /client-stream WS.
@@ -258,10 +354,21 @@ app.post("/api/plivo/client-answer", (req, res) => {
 // MY inbound audio → ElevenLabs S2S → modulated ulaw → client phone
 // Client audio (via /client-stream) → raw passthrough → MY phone (this WS)
 
-myWss.on("connection", (myWs) => {
+myWss.on("connection", (myWs, req) => {
   console.log("\n[MyWS] ─── New call from MY phone ─────────────────────");
 
-  let callUUID  = null;
+  let queryFrom = "";
+  let queryCallUUID = "";
+
+  if (req && req.url) {
+    try {
+      const parsedUrl = new URL(req.url, "http://localhost");
+      queryFrom = parsedUrl.searchParams.get("from") || "";
+      queryCallUUID = parsedUrl.searchParams.get("callUUID") || "";
+    } catch (_) {}
+  }
+
+  let callUUID  = queryCallUUID || null;
   let sessionId = null;
 
   myWs.on("message", async (raw) => {
@@ -270,30 +377,47 @@ myWss.on("connection", (myWs) => {
 
     switch (msg.event) {
       case "start": {
-        callUUID  = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid || "unknown";
+        callUUID  = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid || queryCallUUID || "unknown";
         sessionId = callUUID;
 
-        const fromNumber = msg.start?.from || msg.start?.callerName || "";
-        console.log(`[MyWS] Call started | UUID: ${callUUID} | from: ${fromNumber}`);
+        let fromNumber = queryFrom || msg.start?.from || msg.start?.callerName || "";
+
+        // Check extra_headers from Plivo start event if available
+        if (!fromNumber && msg.start?.extra_headers) {
+          try {
+            if (typeof msg.start.extra_headers === "object") {
+              fromNumber = msg.start.extra_headers.from || "";
+            } else if (typeof msg.start.extra_headers === "string") {
+              const match = msg.start.extra_headers.match(/from:([^;]+)/i);
+              if (match) fromNumber = match[1].trim();
+            }
+          } catch (_) {}
+        }
+
+        console.log(`[MyWS] Call started | UUID: ${callUUID} | from: ${fromNumber || "(not provided in stream)"}`);
         console.log(`[MyWS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
-        if (!isTrustedCaller(fromNumber)) {
-          console.warn(`[MyWS] Untrusted caller ${fromNumber} — rejecting`);
+        if (fromNumber && !isTrustedCaller(fromNumber)) {
+          console.warn(`[MyWS] Untrusted caller "${fromNumber}" (expected ${MY_NUMBER}) — rejecting`);
           myWs.close();
           return;
         }
 
-        const myNum   = normaliseNumber(MY_NUMBER || "agent");
-        const pending = pendingCalls.get(myNum);
+        if (fromNumber) {
+          console.log(`[MyWS] Trusted caller verified: ${fromNumber}`);
+        } else {
+          console.log(`[MyWS] Caller number not explicitly in stream metadata. Falling back to pending call check for MY_NUMBER (${MY_NUMBER}).`);
+        }
 
-        if (!pending || Date.now() - pending.createdAt > PENDING_TTL_MS) {
+        const pending = getPendingCall(fromNumber);
+
+        if (!pending) {
           console.warn("[MyWS] No pending client number registered — hanging up");
           myWs.close();
           return;
         }
 
         const clientNumber = pending.clientNumber;
-        pendingCalls.delete(myNum);
 
         sessions.set(sessionId, {
           myWs,
