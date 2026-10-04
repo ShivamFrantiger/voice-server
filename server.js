@@ -226,6 +226,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get("/", (req, res) => {
   res.json({
     status:       "ok",
+    version:      "1.1.0",
     message:      "Voice modulation server (inverted flow) is running",
     pendingCalls: pendingCalls.size,
     activeCalls:  sessions.size,
