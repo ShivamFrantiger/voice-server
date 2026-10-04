@@ -143,7 +143,8 @@ function numbersMatch(a, b) {
   return false;
 }
 
-function isTrustedCaller(fromNumber) {
+function isTrustedCaller(fromNumber, pendingEntry) {
+  if (pendingEntry) return true;
   if (!MY_NUMBER) return true;
   if (!fromNumber) return false;
   return numbersMatch(fromNumber, MY_NUMBER);
@@ -226,7 +227,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get("/", (req, res) => {
   res.json({
     status:       "ok",
-    version:      "1.1.0",
+    version:      "1.2.0",
     message:      "Voice modulation server (inverted flow) is running",
     pendingCalls: pendingCalls.size,
     activeCalls:  sessions.size,
@@ -236,37 +237,52 @@ app.get("/", (req, res) => {
 /**
  * POST /api/prepare-call
  * Called by VoiceModulator web UI before I dial the Plivo number.
- * Body: { clientNumber: "+91XXXXXXXXXX" }
+ * Body: { clientNumber: "+91XXXXXXXXXX", callerNumber: "+91YYYYYYYYYY" }
  */
 app.post("/api/prepare-call", (req, res) => {
-  const { clientNumber } = req.body;
+  const { clientNumber, callerNumber } = req.body;
 
   if (!clientNumber || clientNumber.trim().length < 5) {
     return res.status(400).json({ error: "clientNumber is required" });
   }
 
-  const myNum = normaliseNumber(MY_NUMBER || "agent");
-  const now   = Date.now();
+  const effectiveCaller = callerNumber ? callerNumber.trim() : (MY_NUMBER || "");
+  if (!effectiveCaller) {
+    return res.status(400).json({ error: "callerNumber is required" });
+  }
+
+  const normCaller = normaliseNumber(effectiveCaller);
+  const now = Date.now();
 
   for (const [key, val] of pendingCalls.entries()) {
     if (now - val.createdAt > PENDING_TTL_MS) pendingCalls.delete(key);
   }
 
-  pendingCalls.set(myNum, { clientNumber: clientNumber.trim(), createdAt: now });
-  console.log(`[PrepareCall] Registered: ${myNum} → ${clientNumber.trim()}`);
+  pendingCalls.set(normCaller, {
+    clientNumber: clientNumber.trim(),
+    callerNumber: effectiveCaller,
+    createdAt: now,
+  });
+  console.log(`[PrepareCall] Registered caller ${normCaller} (${effectiveCaller}) → client ${clientNumber.trim()}`);
 
   return res.json({
     success:      true,
     message:      "Ready. Now dial the Plivo number from your phone.",
     clientNumber: clientNumber.trim(),
+    callerNumber: effectiveCaller,
     expiresInMs:  PENDING_TTL_MS,
   });
 });
 
 /** GET /api/prepare-call/status */
 app.get("/api/prepare-call/status", (req, res) => {
-  const myNum  = normaliseNumber(MY_NUMBER || "agent");
-  const entry  = pendingCalls.get(myNum);
+  const reqCaller = req.query.callerNumber;
+  const callerKey = reqCaller ? normaliseNumber(reqCaller) : normaliseNumber(MY_NUMBER || "");
+  
+  let entry = callerKey ? pendingCalls.get(callerKey) : null;
+  if (!entry && pendingCalls.size > 0) {
+    entry = pendingCalls.values().next().value;
+  }
   const active = sessions.size;
 
   if (!entry || Date.now() - entry.createdAt > PENDING_TTL_MS) {
@@ -276,6 +292,7 @@ app.get("/api/prepare-call/status", (req, res) => {
   return res.json({
     pending:      true,
     clientNumber: entry.clientNumber,
+    callerNumber: entry.callerNumber,
     activeCalls:  active,
     expiresInMs:  PENDING_TTL_MS - (Date.now() - entry.createdAt),
   });
@@ -419,8 +436,16 @@ myWss.on("connection", (myWs, req) => {
         console.log(`[MyWS] Call started | UUID: ${callUUID} | from: ${fromNumber || "(not provided in stream)"}`);
         console.log(`[MyWS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
-        if (fromNumber && !isTrustedCaller(fromNumber)) {
-          console.warn(`[MyWS] Untrusted caller "${fromNumber}" (expected ${MY_NUMBER}) — rejecting`);
+        const pending = getPendingCall(fromNumber);
+
+        if (!pending) {
+          console.warn("[MyWS] No pending client number registered — hanging up");
+          myWs.close();
+          return;
+        }
+
+        if (fromNumber && !isTrustedCaller(fromNumber, pending)) {
+          console.warn(`[MyWS] Untrusted caller "${fromNumber}" — rejecting`);
           myWs.close();
           return;
         }
@@ -428,15 +453,7 @@ myWss.on("connection", (myWs, req) => {
         if (fromNumber) {
           console.log(`[MyWS] Trusted caller verified: ${fromNumber}`);
         } else {
-          console.log(`[MyWS] Caller number not explicitly in stream metadata. Falling back to pending call check for MY_NUMBER (${MY_NUMBER}).`);
-        }
-
-        const pending = getPendingCall(fromNumber);
-
-        if (!pending) {
-          console.warn("[MyWS] No pending client number registered — hanging up");
-          myWs.close();
-          return;
+          console.log(`[MyWS] Using pending registration for caller ${pending.callerNumber || MY_NUMBER}`);
         }
 
         const clientNumber = pending.clientNumber;
