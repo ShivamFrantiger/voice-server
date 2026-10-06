@@ -1,12 +1,9 @@
 Plan this throughly before implementing
 
-So this is what i want to create
+So this is what i have created
 A voice modulation call system where there are 2 phones and 3 numebrs
 
-client from his phone and number calls a plivo number
-the plivo number redirects to my phone and number
+where i can put my number and clinet number in [VoiceModulator](file;file:///c%3A/Drive/Baba/VoiceModulator) 
 
-and i can pick up the call and talk to client directly
-now when client speaks his normal voice comes to me
-but when i speak a modulated voice should come
-
+and then call the plivo number so it auto matically redirectly to the numerb provided here [page.tsx](file;file:///c%3A/Drive/Baba/VoiceModulator/src/app/page.tsx) 
+and when i speak that number client will listen a mosulated voice whihc is coded here [voice-server](file;file:///c%3A/Drive/Baba/voice-server) 

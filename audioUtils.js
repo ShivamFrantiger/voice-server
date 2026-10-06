@@ -18,7 +18,7 @@ function mulawToPcm16k(mulawBuffer) {
   wav.toSampleRate(16000);
   
   const pcm16k = wav.getSamples(false, Int16Array);
-  return Buffer.from(pcm16k.buffer);
+  return Buffer.from(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
 }
 
 /**
@@ -47,11 +47,18 @@ function stripWavHeader(buffer) {
  */
 function pcm24kToMulaw(pcmBuffer) {
   let rawPcm = stripWavHeader(pcmBuffer);
+  if (rawPcm.byteLength % 2 !== 0) {
+    rawPcm = rawPcm.subarray(0, rawPcm.byteLength - 1);
+  }
+  let alignedPcm = rawPcm;
+  if (rawPcm.byteOffset % 2 !== 0) {
+    alignedPcm = Buffer.from(rawPcm);
+  }
   
   // Create a WAV in memory so wavefile can resample it
   const wav = new WaveFile();
   // 1 channel, 24000 Hz, 16-bit, samples
-  wav.fromScratch(1, 24000, '16', new Int16Array(rawPcm.buffer, rawPcm.byteOffset, rawPcm.byteLength / 2));
+  wav.fromScratch(1, 24000, '16', new Int16Array(alignedPcm.buffer, alignedPcm.byteOffset, alignedPcm.byteLength / 2));
   
   // Resample properly to 8kHz (this avoids the aliasing distortion!)
   wav.toSampleRate(8000);
@@ -61,17 +68,24 @@ function pcm24kToMulaw(pcmBuffer) {
   
   // Encode to μ-law
   const encoded = alawmulaw.mulaw.encode(pcm8k);
-  return Buffer.from(encoded.buffer);
+  return Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength);
 }
 
 /**
  * Convert 8kHz PCM directly to μ-law (if Sarvam outputs 8kHz directly)
  */
 function pcm8kToMulaw(pcmBuffer) {
-  const rawPcm = stripWavHeader(pcmBuffer);
-  const pcm8k = new Int16Array(rawPcm.buffer, rawPcm.byteOffset, rawPcm.byteLength / 2);
+  let rawPcm = stripWavHeader(pcmBuffer);
+  if (rawPcm.byteLength % 2 !== 0) {
+    rawPcm = rawPcm.subarray(0, rawPcm.byteLength - 1);
+  }
+  let alignedPcm = rawPcm;
+  if (rawPcm.byteOffset % 2 !== 0) {
+    alignedPcm = Buffer.from(rawPcm);
+  }
+  const pcm8k = new Int16Array(alignedPcm.buffer, alignedPcm.byteOffset, alignedPcm.byteLength / 2);
   const encoded = alawmulaw.mulaw.encode(pcm8k);
-  return Buffer.from(encoded.buffer);
+  return Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength);
 }
 
 /**
