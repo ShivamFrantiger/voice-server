@@ -1,10 +1,36 @@
-# Switch to ElevenLabs Guide (`switchToEleven.md`)
+# Voice Modulation Engine Guide (`switchToEleven.md`)
 
-This guide explains how to switch [server.js](file:///c:/Drive/Baba/voice-server/server.js) from the **Sarvam (STT + TTS)** engine back to the **ElevenLabs (Speech-to-Speech)** engine in under 60 seconds, while commenting out Sarvam so you can revive it anytime.
+> [!NOTE]
+> **Manual Code Editing is No Longer Needed!**
+> The system has been upgraded to a **Dynamic Dual-Engine Architecture**. Both ElevenLabs and Sarvam run side-by-side. You can select either engine on the frontend UI ([VoiceModulator](file:///c:/Drive/Baba/VoiceModulator/src/app/page.tsx)), via the CLI (`node switchEngine.js elevenlabs` / `sarvam`), or via the REST API (`POST /api/engine`).
+> 
+> The sections below are preserved for historical reference of how each engine operates internally.
 
 ---
 
-## Quick Reference Summary
+## Quick Reference: Switching Engines on Command
+
+### 1. From the Frontend UI (`VoiceModulator`)
+Simply click the **ElevenLabs S2S** or **Sarvam AI** toggle card on the dialer screen before clicking "Initiate Guruji Voice Call". Your preference is auto-saved in your browser.
+
+### 2. From the Command Line (CLI)
+```bash
+# In c:\Drive\Baba\voice-server
+npm run switch:eleven       # Switch default engine to ElevenLabs
+npm run switch:sarvam       # Switch default engine to Sarvam AI
+npm run engine:status       # Check current engine status
+```
+
+### 3. Via REST API (Live on Render / Production)
+```bash
+# Switch to Sarvam
+curl -X POST https://voice-server-i2v1.onrender.com/api/engine -H "Content-Type: application/json" -d '{"engine":"sarvam"}'
+
+# Switch to ElevenLabs
+curl -X POST https://voice-server-i2v1.onrender.com/api/engine -H "Content-Type: application/json" -d '{"engine":"elevenlabs"}'
+```
+
+---
 
 There are **5 exact spots** in [server.js](file:///c:/Drive/Baba/voice-server/server.js) with paired Sarvam and ElevenLabs blocks:
 

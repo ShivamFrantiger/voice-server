@@ -5,6 +5,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "switch:eleven": "node switchEngine.js elevenlabs",
+    "switch:sarvam": "node switchEngine.js sarvam",
+    "engine:status": "node switchEngine.js status",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

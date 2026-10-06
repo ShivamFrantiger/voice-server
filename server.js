@@ -42,34 +42,39 @@ const { WebSocketServer } = require("ws");
 
 const { dialClient, hangupCall } = require("./plivoClient");
 
-// ─── Voice Modulation Engine Configuration ────────────────────────────────────
-
-// === ACTIVE ENGINE: SARVAM STT + TTS ==========================================
+// ─── Voice Modulation Engines Configuration ──────────────────────────────────
+// Both engines loaded simultaneously so calls can switch dynamically at runtime!
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
+const { ElevenLabsS2S }   = require("./elevenLabsS2S");
 const { mulawToPcm16k, pcm24kToMulaw } = require("./audioUtils");
 
 const PORT           = process.env.PORT || 8080;
+const MY_NUMBER      = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
+
+// Sarvam Config
 const SARVAM_KEY     = process.env.SARVAM_API_KEY;
 const SARVAM_SPEAKER = process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
 const SARVAM_LANG    = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
-const MY_NUMBER      = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
 
-if (!SARVAM_KEY)  console.warn("[Config] SARVAM_API_KEY not set");
-if (!MY_NUMBER)   console.warn("[Config] MY_PHONE_NUMBER not set — caller validation disabled");
-
-/*
-// === ELEVENLABS ENGINE CONFIG (COMMENTED - UNCOMMENT TO REVIVE) ===============
-const { ElevenLabsS2S } = require("./elevenLabsS2S");
+// ElevenLabs Config
 const ELEVEN_KEY    = process.env.ELEVEN_LABS_API;
 const ELEVEN_VOICE  = process.env.ELEVEN_LABS_VOICE_ID;
 const ELEVEN_MODEL  = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
 const SILENCE_MS    = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "300", 10);
 const SPEECH_THRESH = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "200", 10);
+
+if (!SARVAM_KEY)   console.warn("[Config] SARVAM_API_KEY not set");
 if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
 if (!ELEVEN_VOICE) console.warn("[Config] ELEVEN_LABS_VOICE_ID not set");
-// ==============================================================================
-*/
+if (!MY_NUMBER)    console.warn("[Config] MY_PHONE_NUMBER not set — caller validation disabled");
+
+// Global default engine (can be changed on command via POST /api/engine)
+let currentDefaultEngine = (process.env.DEFAULT_ENGINE || "elevenlabs").toLowerCase();
+if (currentDefaultEngine !== "sarvam" && currentDefaultEngine !== "elevenlabs") {
+  currentDefaultEngine = "elevenlabs";
+}
+console.log(`[Config] Default Modulation Engine: ${currentDefaultEngine}`);
 
 // ─── In-memory stores ─────────────────────────────────────────────────────────
 
@@ -240,24 +245,79 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get("/", (req, res) => {
   res.json({
-    status:       "ok",
-    version:      "1.3.0",
-    engine:       "Sarvam (STT + TTS)",
-    voice:        SARVAM_SPEAKER,
-    language:     SARVAM_LANG,
-    message:      "Voice modulation server (Sarvam STT + TTS flow) is running",
-    pendingCalls: pendingCalls.size,
-    activeCalls:  sessions.size,
+    status:           "ok",
+    version:          "2.0.0",
+    defaultEngine:    currentDefaultEngine,
+    availableEngines: ["elevenlabs", "sarvam"],
+    voices: {
+      elevenlabs: ELEVEN_VOICE || "not configured",
+      sarvam:     `${SARVAM_SPEAKER} (${SARVAM_LANG})`,
+    },
+    message:          `Voice modulation server is running with ${currentDefaultEngine} as default`,
+    pendingCalls:     pendingCalls.size,
+    activeCalls:      sessions.size,
+  });
+});
+
+/**
+ * GET /api/engine
+ * Returns current default engine, available engines, and config status.
+ */
+app.get("/api/engine", (req, res) => {
+  res.json({
+    currentEngine:    currentDefaultEngine,
+    availableEngines: ["elevenlabs", "sarvam"],
+    config: {
+      elevenlabs: {
+        voiceId:         ELEVEN_VOICE || null,
+        model:           ELEVEN_MODEL,
+        silenceMs:       SILENCE_MS,
+        speechThreshold: SPEECH_THRESH,
+        isConfigured:    Boolean(ELEVEN_KEY && ELEVEN_VOICE),
+      },
+      sarvam: {
+        speaker:      SARVAM_SPEAKER,
+        language:     SARVAM_LANG,
+        isConfigured: Boolean(SARVAM_KEY),
+      },
+    },
+  });
+});
+
+/**
+ * POST /api/engine
+ * Switch default modulation engine on command!
+ * Accepts { "engine": "elevenlabs" | "sarvam" } or ?engine=...
+ */
+app.post("/api/engine", (req, res) => {
+  const reqEngine = (req.body?.engine || req.query?.engine || "").trim().toLowerCase();
+  if (reqEngine !== "elevenlabs" && reqEngine !== "sarvam") {
+    return res.status(400).json({
+      error: "Invalid engine. Must be 'elevenlabs' or 'sarvam'.",
+      currentEngine: currentDefaultEngine,
+      availableEngines: ["elevenlabs", "sarvam"],
+    });
+  }
+
+  const prev = currentDefaultEngine;
+  currentDefaultEngine = reqEngine;
+  console.log(`[Engine] Default modulation engine switched: ${prev} ➔ ${currentDefaultEngine}`);
+
+  return res.json({
+    success:        true,
+    message:        `Default modulation engine switched to ${currentDefaultEngine}`,
+    previousEngine: prev,
+    currentEngine:  currentDefaultEngine,
   });
 });
 
 /**
  * POST /api/prepare-call
  * Called by VoiceModulator web UI before I dial the Plivo number.
- * Body: { clientNumber: "+91XXXXXXXXXX", callerNumber: "+91YYYYYYYYYY" }
+ * Body: { clientNumber: "+91XXXXXXXXXX", callerNumber: "+91YYYYYYYYYY", engine?: "elevenlabs" | "sarvam" }
  */
 app.post("/api/prepare-call", (req, res) => {
-  const { clientNumber, callerNumber } = req.body;
+  const { clientNumber, callerNumber, engine } = req.body;
 
   if (!clientNumber || clientNumber.trim().length < 5) {
     return res.status(400).json({ error: "clientNumber is required" });
@@ -275,18 +335,25 @@ app.post("/api/prepare-call", (req, res) => {
     if (now - val.createdAt > PENDING_TTL_MS) pendingCalls.delete(key);
   }
 
+  // Determine engine: requested engine or fallback to server default
+  const selectedEngine = (engine && (engine.toLowerCase() === "sarvam" || engine.toLowerCase() === "elevenlabs"))
+    ? engine.toLowerCase()
+    : currentDefaultEngine;
+
   pendingCalls.set(normCaller, {
     clientNumber: clientNumber.trim(),
     callerNumber: effectiveCaller,
-    createdAt: now,
+    engine:       selectedEngine,
+    createdAt:    now,
   });
-  console.log(`[PrepareCall] Registered caller ${normCaller} (${effectiveCaller}) → client ${clientNumber.trim()}`);
+  console.log(`[PrepareCall] Registered caller ${normCaller} (${effectiveCaller}) ➔ client ${clientNumber.trim()} | Engine: ${selectedEngine}`);
 
   return res.json({
     success:      true,
-    message:      "Ready. Now dial the Plivo number from your phone.",
+    message:      `Ready. Engine: ${selectedEngine}. Now dial the Plivo number from your phone.`,
     clientNumber: clientNumber.trim(),
     callerNumber: effectiveCaller,
+    engine:       selectedEngine,
     expiresInMs:  PENDING_TTL_MS,
   });
 });
@@ -303,13 +370,14 @@ app.get("/api/prepare-call/status", (req, res) => {
   const active = sessions.size;
 
   if (!entry || Date.now() - entry.createdAt > PENDING_TTL_MS) {
-    return res.json({ pending: false, activeCalls: active });
+    return res.json({ pending: false, activeCalls: active, currentEngine: currentDefaultEngine });
   }
 
   return res.json({
     pending:      true,
     clientNumber: entry.clientNumber,
     callerNumber: entry.callerNumber,
+    engine:       entry.engine || currentDefaultEngine,
     activeCalls:  active,
     expiresInMs:  PENDING_TTL_MS - (Date.now() - entry.createdAt),
   });
@@ -474,20 +542,22 @@ myWss.on("connection", (myWs, req) => {
         }
 
         const clientNumber = pending.clientNumber;
+        const callEngine   = (pending.engine || currentDefaultEngine || "elevenlabs").toLowerCase();
 
         sessions.set(sessionId, {
           myWs,
           clientWs:       null,
+          engine:         callEngine,
           sttWs:          null,
           ttsWs:          null,
-          // s2s:         null, // (ElevenLabs handle - uncomment if reviving)
+          s2s:            null,
           streamer:       new AudioStreamer(null, sessionId, "client"),
           clientNumber,
           myCallUuid:     callUUID,
           clientCallUuid: null,
         });
 
-        console.log(`[MyWS] Will dial client: ${clientNumber}`);
+        console.log(`[MyWS] Session ${sessionId} initialized | Engine: ${callEngine} | Will dial client: ${clientNumber}`);
 
         try {
           const resp = await dialClient(sessionId, clientNumber);
@@ -509,34 +579,36 @@ myWss.on("connection", (myWs, req) => {
         // MY voice (inbound from my phone) → feed to modulation pipeline
         if (track === "inbound") {
           const session = sessions.get(sessionId);
+          if (!session) break;
 
-          // === SARVAM STT FLOW (ACTIVE) ===
-          // Converts 8kHz mu-law from Plivo to 16kHz PCM and streams to Sarvam STT WebSocket
-          if (session?.sttWs && session.sttWs.readyState === 1) {
-            try {
-              const mulawBuf = Buffer.from(payload, "base64");
-              const pcmBuf   = mulawToPcm16k(mulawBuf);
-              session.sttWs.sendAudio(pcmBuf);
-              if (Math.random() < 0.05) {
-                console.log(`[MyWS→STT] Audio frame forwarded to Sarvam STT (session: ${sessionId})`);
+          if (session.engine === "sarvam") {
+            // === SARVAM STT FLOW ===
+            if (session.sttWs && session.sttWs.readyState === 1) {
+              try {
+                const mulawBuf = Buffer.from(payload, "base64");
+                const pcmBuf   = mulawToPcm16k(mulawBuf);
+                session.sttWs.sendAudio(pcmBuf);
+                if (Math.random() < 0.05) {
+                  console.log(`[MyWS→STT] Audio frame forwarded to Sarvam STT (session: ${sessionId})`);
+                }
+              } catch (err) {
+                console.error("[MyWS→STT] Conversion/Send error:", err.message);
               }
-            } catch (err) {
-              console.error("[MyWS→STT] Conversion/Send error:", err.message);
+            }
+          } else {
+            // === ELEVENLABS S2S FLOW ===
+            if (session.s2s) {
+              try {
+                const mulawBuf = Buffer.from(payload, "base64");
+                session.s2s.addAudio(mulawBuf);
+                if (Math.random() < 0.05) {
+                  console.log(`[MyWS→S2S] Audio frame forwarded to ElevenLabs S2S (session: ${sessionId})`);
+                }
+              } catch (err) {
+                console.error("[MyWS→S2S] Error:", err.message);
+              }
             }
           }
-
-          /*
-          // === ELEVENLABS S2S FLOW (COMMENTED - UNCOMMENT TO REVIVE) ===
-          if (session?.s2s) {
-            try {
-              const mulawBuf = Buffer.from(payload, "base64");
-              session.s2s.addAudio(mulawBuf);
-            } catch (err) {
-              console.error("[MyWS→S2S] Error:", err.message);
-            }
-          }
-          // =============================================================
-          */
         }
         break;
       }
@@ -574,85 +646,87 @@ clientWss.on("connection", (clientWs, req) => {
     return;
   }
 
-  session.clientWs = clientWs;
-  console.log(`[ClientWS] Linked to session ${sessionId} | client: ${session.clientNumber}`);
+  session.clientWs    = clientWs;
+  session.streamer.ws = clientWs;
+  console.log(`[ClientWS] Linked to session ${sessionId} | client: ${session.clientNumber} | engine: ${session.engine}`);
 
-  // === SARVAM STT + TTS INITIALIZATION (ACTIVE) ===============================
-  // 1. Initialise Sarvam TTS — outputs modulated speech to client
-  const ttsWs = createSarvamTTS(
-    SARVAM_KEY,
-    SARVAM_SPEAKER,
-    SARVAM_LANG,
-    (pcmBuffer) => {
-      const cur = sessions.get(sessionId);
-      if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
+  if (session.engine === "sarvam") {
+    // === INITIALIZE SARVAM (STT + TTS) ========================================
+    console.log(`[ClientWS] Initializing Sarvam STT + TTS for session ${sessionId}...`);
 
-      if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
-        cur.streamer.ws = cur.clientWs;
+    // 1. Initialise Sarvam TTS — outputs modulated speech to client
+    const ttsWs = createSarvamTTS(
+      SARVAM_KEY,
+      SARVAM_SPEAKER,
+      SARVAM_LANG,
+      (pcmBuffer) => {
+        const cur = sessions.get(sessionId);
+        if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
+
+        if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
+          cur.streamer.ws = cur.clientWs;
+        }
+
+        try {
+          // Resample Sarvam 24kHz linear16 PCM to 8kHz mu-law
+          const mulawBuf = pcm24kToMulaw(pcmBuffer);
+          cur.streamer.addAudio(mulawBuf);
+
+          if (Math.random() < 0.05) {
+            console.log(`[TTS→Client] Buffered Sarvam modulated audio (session: ${sessionId})`);
+          }
+        } catch (err) {
+          console.error("[TTS→Client] Audio downsampling error:", err.message);
+        }
       }
+    );
+    session.ttsWs = ttsWs;
 
-      try {
-        // Resample Sarvam 24kHz linear16 PCM to 8kHz mu-law
-        const mulawBuf = pcm24kToMulaw(pcmBuffer);
-        cur.streamer.addAudio(mulawBuf);
+    // 2. Initialise Sarvam Realtime STT — transcribes MY speech and feeds into TTS
+    const sttWs = createSarvamSTT(
+      SARVAM_KEY,
+      SARVAM_LANG,
+      (transcript, isFinal) => {
+        if (isFinal && transcript && transcript.trim().length > 0) {
+          console.log(`[STT→TTS] Final transcript recognized: "${transcript}"`);
+          const cur = sessions.get(sessionId);
+          if (cur?.ttsWs) {
+            cur.ttsWs.synthesize(transcript);
+          } else {
+            console.warn("[STT→TTS] TTS not ready, dropping transcript:", transcript);
+          }
+        }
+      }
+    );
+    session.sttWs = sttWs;
+  } else {
+    // === INITIALIZE ELEVENLABS (S2S) ==========================================
+    console.log(`[ClientWS] Initializing ElevenLabs S2S for session ${sessionId}...`);
+
+    const s2s = new ElevenLabsS2S(
+      ELEVEN_KEY,
+      ELEVEN_VOICE,
+      (ulawChunk) => {
+        const cur = sessions.get(sessionId);
+        if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
+
+        if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
+          cur.streamer.ws = cur.clientWs;
+        }
+        cur.streamer.addAudio(ulawChunk);
 
         if (Math.random() < 0.05) {
-          console.log(`[TTS→Client] Buffered Sarvam modulated audio (session: ${sessionId})`);
+          console.log(`[S2S→Client] Buffered ElevenLabs modulated audio (session: ${sessionId})`);
         }
-      } catch (err) {
-        console.error("[TTS→Client] Audio downsampling error:", err.message);
-      }
-    }
-  );
-  session.ttsWs = ttsWs;
-
-  // 2. Initialise Sarvam Realtime STT — transcribes MY speech and feeds into TTS
-  const sttWs = createSarvamSTT(
-    SARVAM_KEY,
-    SARVAM_LANG,
-    (transcript, isFinal) => {
-      if (isFinal && transcript && transcript.trim().length > 0) {
-        console.log(`[STT→TTS] Final transcript recognized: "${transcript}"`);
-        const cur = sessions.get(sessionId);
-        if (cur?.ttsWs) {
-          cur.ttsWs.synthesize(transcript);
-        } else {
-          console.warn("[STT→TTS] TTS not ready, dropping transcript:", transcript);
-        }
-      }
-    }
-  );
-  session.sttWs = sttWs;
-
-  session.streamer.ws = clientWs;
-
-  /*
-  // === ELEVENLABS S2S INITIALIZATION (COMMENTED - UNCOMMENT TO REVIVE) =========
-  const s2s = new ElevenLabsS2S(
-    ELEVEN_KEY,
-    ELEVEN_VOICE,
-    (ulawChunk) => {
-      const cur = sessions.get(sessionId);
-      if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
-
-      if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
-        cur.streamer.ws = cur.clientWs;
-      }
-      cur.streamer.addAudio(ulawChunk);
-
-      if (Math.random() < 0.05)
-        console.log(`[S2S→Client] Buffered modulated audio (session: ${sessionId})`);
-    },
-    {
-      silenceDurationMs: SILENCE_MS,
-      speechThreshold:   SPEECH_THRESH,
-      modelId:           ELEVEN_MODEL,
-    },
-  );
-  session.streamer.ws = clientWs;
-  session.s2s = s2s;
-  // ============================================================================
-  */
+      },
+      {
+        silenceDurationMs: SILENCE_MS,
+        speechThreshold:   SPEECH_THRESH,
+        modelId:           ELEVEN_MODEL,
+      },
+    );
+    session.s2s = s2s;
+  }
 
   clientWs.on("message", (raw) => {
     let msg;
@@ -693,9 +767,8 @@ clientWss.on("connection", (clientWs, req) => {
   });
 
   clientWs.on("close", (code) => {
-    console.log(`[ClientWS] Closed (code=${code})`);
-    cleanupSarvam(sessionId);
-    // cleanupElevenLabs(sessionId); // (Uncomment if reviving ElevenLabs)
+    console.log(`[ClientWS] Closed (code=${code}) | session: ${sessionId}`);
+    cleanupSession(sessionId);
     const cur = sessions.get(sessionId);
     if (cur) cur.clientWs = null;
   });
@@ -705,32 +778,20 @@ clientWss.on("connection", (clientWs, req) => {
 
 // ─── Cleanup Helpers ──────────────────────────────────────────────────────────
 
-function cleanupSarvam(sessionId) {
-  const session = sessions.get(sessionId);
-  if (!session) return;
-  try { session.sttWs?.close(); } catch {}
-  try { session.ttsWs?.close(); } catch {}
-  if (session.streamer) session.streamer.stop();
-  session.sttWs = null;
-  session.ttsWs = null;
-}
-
-/*
-// === ELEVENLABS CLEANUP (COMMENTED - UNCOMMENT TO REVIVE) =====================
-function cleanupElevenLabs(sessionId) {
-  const session = sessions.get(sessionId);
-  if (!session) return;
-  try { session.s2s?.destroy(); } catch {}
-  if (session.streamer) session.streamer.stop();
-  session.s2s = null;
-}
-// ==============================================================================
-*/
-
 function cleanupSession(sessionId) {
   if (!sessionId) return;
-  cleanupSarvam(sessionId);
-  // cleanupElevenLabs(sessionId); // (Uncomment if reviving ElevenLabs)
+  const session = sessions.get(sessionId);
+  if (session) {
+    try { session.s2s?.destroy(); } catch {}
+    try { session.sttWs?.close(); } catch {}
+    try { session.ttsWs?.close(); } catch {}
+    try { session.streamer?.stop(); } catch {}
+    session.s2s      = null;
+    session.sttWs    = null;
+    session.ttsWs    = null;
+    session.clientWs = null;
+    session.myWs     = null;
+  }
   sessions.delete(sessionId);
   console.log(`[Cleanup] Session ${sessionId} removed`);
 }
@@ -739,14 +800,15 @@ function cleanupSession(sessionId) {
 
 server.listen(PORT, () => {
   console.log("");
-  console.log("╔══════════════════════════════════════════╗");
-  console.log("║   Voice Modulation Server (Inverted)     ║");
-  console.log(`║   HTTP : http://localhost:${PORT}          ║`);
-  console.log(`║   WS   : ws://localhost:${PORT}/stream     ║`);
-  console.log(`║   WS   : ws://localhost:${PORT}/client-stream ║`);
-  console.log(`║   Engine: Sarvam (STT + TTS)             ║`);
-  console.log(`║   Voice : ${SARVAM_SPEAKER} (${SARVAM_LANG})  ║`);
-  console.log(`║   My # : ${MY_NUMBER || "NOT SET"}  ║`);
-  console.log("╚══════════════════════════════════════════╝");
+  console.log("╔══════════════════════════════════════════════════════════════╗");
+  console.log("║     Voice Modulation Server (Dynamic Dual Engine)            ║");
+  console.log(`║   HTTP : http://localhost:${PORT}                              ║`);
+  console.log(`║   WS   : ws://localhost:${PORT}/stream                         ║`);
+  console.log(`║   WS   : ws://localhost:${PORT}/client-stream                  ║`);
+  console.log(`║   Default Engine   : ${currentDefaultEngine.padEnd(39)} ║`);
+  console.log(`║   ElevenLabs Voice : ${(ELEVEN_VOICE?.slice(0, 24) || "not set").padEnd(39)} ║`);
+  console.log(`║   Sarvam Speaker   : ${(SARVAM_SPEAKER?.slice(0, 24) || "not set").padEnd(39)} ║`);
+  console.log(`║   My #             : ${(MY_NUMBER || "NOT SET").padEnd(39)} ║`);
+  console.log("╚══════════════════════════════════════════════════════════════╝");
   console.log("");
 });
