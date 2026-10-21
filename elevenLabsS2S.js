@@ -50,35 +50,35 @@ const MAX_CONCURRENT = 2;
  */
 class ElevenLabsS2S {
   constructor(apiKey, voiceId, onAudioChunk, options = {}) {
-    this.apiKey       = apiKey;
-    this.voiceId      = voiceId;
+    this.apiKey = apiKey;
+    this.voiceId = voiceId;
     this.onAudioChunk = onAudioChunk;
 
     // VAD config — tuned for telephone-quality audio
     this.silenceDurationMs = options.silenceDurationMs ?? 300;
-    this.speechThreshold   = options.speechThreshold   ?? 100;  // was 200
-    this.minSpeechMs       = options.minSpeechMs       ?? 100;  // was 250
-    this.maxSpeechMs       = options.maxSpeechMs       ?? 4000; // was 15000 — short segments!
-    this.modelId           = options.modelId           ?? "eleven_multilingual_sts_v2";
+    this.speechThreshold = options.speechThreshold ?? 100; // was 200
+    this.minSpeechMs = options.minSpeechMs ?? 100; // was 250
+    this.maxSpeechMs = options.maxSpeechMs ?? 4000; // was 15000 — short segments!
+    this.modelId = options.modelId ?? "eleven_multilingual_sts_v2";
 
     // VAD state
-    this._speechBuffers  = [];   // Array<Buffer> — accumulated μ-law chunks
-    this._isSpeaking     = false;
-    this._speechStart    = 0;    // Date.now() when speech began
-    this._silenceTimer   = null;
-    this._maxTimer       = null;
-    this._hangoverCount  = 0;    // consecutive below-threshold frames
+    this._speechBuffers = []; // Array<Buffer> — accumulated μ-law chunks
+    this._isSpeaking = false;
+    this._speechStart = 0; // Date.now() when speech began
+    this._silenceTimer = null;
+    this._maxTimer = null;
+    this._hangoverCount = 0; // consecutive below-threshold frames
 
     // Pipeline: ordered queue to keep segments in sequence
-    this._queue          = Promise.resolve();
+    this._queue = Promise.resolve();
     this._activeRequests = 0;
 
     // Monitoring
     this._totalSegments = 0;
-    this._sessionStart  = Date.now();
+    this._sessionStart = Date.now();
 
     console.log(
-      `[S2S] Initialised | voice=${voiceId} | silence=${this.silenceDurationMs}ms | threshold=${this.speechThreshold} | maxSegMs=${this.maxSpeechMs}`
+      `[S2S] Initialised | voice=${voiceId} | silence=${this.silenceDurationMs}ms | threshold=${this.speechThreshold} | maxSegMs=${this.maxSpeechMs}`,
     );
   }
 
@@ -91,7 +91,7 @@ class ElevenLabsS2S {
    * @param {Buffer} mulawBuffer
    */
   addAudio(mulawBuffer) {
-    const rms      = this._computeRms(mulawBuffer);
+    const rms = this._computeRms(mulawBuffer);
     const isSpeech = rms > this.speechThreshold;
 
     if (isSpeech) {
@@ -108,9 +108,11 @@ class ElevenLabsS2S {
   destroy() {
     this._clearTimers();
     this._speechBuffers = [];
-    this._isSpeaking    = false;
+    this._isSpeaking = false;
     const uptime = ((Date.now() - this._sessionStart) / 1000).toFixed(1);
-    console.log(`[S2S] Destroyed | uptime=${uptime}s | segments=${this._totalSegments}`);
+    console.log(
+      `[S2S] Destroyed | uptime=${uptime}s | segments=${this._totalSegments}`,
+    );
   }
 
   // ─── VAD internals ──────────────────────────────────────────────────────────
@@ -124,7 +126,7 @@ class ElevenLabsS2S {
 
     if (!this._isSpeaking) {
       // Transition to SPEAKING
-      this._isSpeaking  = true;
+      this._isSpeaking = true;
       this._speechStart = Date.now();
       this._speechBuffers = [];
       console.log("[S2S] VAD: speech started");
@@ -132,7 +134,9 @@ class ElevenLabsS2S {
       // Hard cap: flush after maxSpeechMs even mid-sentence
       // Short segments (4s max) drastically reduce perceived latency
       this._maxTimer = setTimeout(() => {
-        console.log(`[S2S] VAD: max segment duration (${this.maxSpeechMs}ms) — force flush`);
+        console.log(
+          `[S2S] VAD: max segment duration (${this.maxSpeechMs}ms) — force flush`,
+        );
         this._flush();
       }, this.maxSpeechMs);
     }
@@ -169,41 +173,53 @@ class ElevenLabsS2S {
     if (!this._isSpeaking || this._speechBuffers.length === 0) return;
 
     const speechDurationMs = Date.now() - this._speechStart;
-    const buffers          = this._speechBuffers;
+    const buffers = this._speechBuffers;
 
     // Reset VAD state immediately so new audio can accumulate during API call
-    this._isSpeaking    = false;
+    this._isSpeaking = false;
     this._speechBuffers = [];
     this._hangoverCount = 0;
 
     if (speechDurationMs < this.minSpeechMs) {
-      console.log(`[S2S] VAD: segment too short (${speechDurationMs}ms) — skipping`);
+      console.log(
+        `[S2S] VAD: segment too short (${speechDurationMs}ms) — skipping`,
+      );
       return;
     }
 
     this._totalSegments++;
-    console.log(`[S2S] Flushing segment #${this._totalSegments} (${speechDurationMs}ms, ${buffers.length} chunks)`);
+    console.log(
+      `[S2S] Flushing segment #${this._totalSegments} (${speechDurationMs}ms, ${buffers.length} chunks)`,
+    );
 
     // Pipeline parallelism: if we're under MAX_CONCURRENT, fire immediately
     // Otherwise, enqueue to preserve ordering
     if (this._activeRequests < MAX_CONCURRENT) {
       // Slot available — run immediately alongside existing request(s)
       this._activeRequests++;
-      this._sendToElevenLabs(buffers)
-        .finally(() => { this._activeRequests--; });
+      this._sendToElevenLabs(buffers).finally(() => {
+        this._activeRequests--;
+      });
     } else {
       // Queue behind existing requests
       this._queue = this._queue.then(() => {
         this._activeRequests++;
-        return this._sendToElevenLabs(buffers)
-          .finally(() => { this._activeRequests--; });
+        return this._sendToElevenLabs(buffers).finally(() => {
+          this._activeRequests--;
+        });
       });
     }
   }
 
   _clearTimers() {
-    if (this._silenceTimer) { clearTimeout(this._silenceTimer); this._silenceTimer = null; }
-    if (this._maxTimer)     { clearTimeout(this._maxTimer);     this._maxTimer     = null; }
+    if (this._silenceTimer) {
+      clearTimeout(this._silenceTimer);
+      this._silenceTimer = null;
+    }
+    if (this._maxTimer) {
+      clearTimeout(this._maxTimer);
+      this._maxTimer = null;
+    }
   }
 
   // ─── ElevenLabs API call ────────────────────────────────────────────────────
@@ -248,9 +264,9 @@ class ElevenLabsS2S {
     form.append(
       "voice_settings",
       JSON.stringify({
-        stability:         0.7,   // More stable → fewer artifacts on telephone audio
-        similarity_boost:  0.85,  // Slightly reduced → avoids over-fitting glitches
-        style:             0,
+        stability: 0.7, // More stable → fewer artifacts on telephone audio
+        similarity_boost: 1, // Slightly reduced → avoids over-fitting glitches
+        style: 0,
         use_speaker_boost: true,
       }),
     );
@@ -260,9 +276,9 @@ class ElevenLabsS2S {
     let response;
     try {
       response = await fetch(url, {
-        method:  "POST",
+        method: "POST",
         headers: { "xi-api-key": this.apiKey },
-        body:    form,
+        body: form,
       });
     } catch (err) {
       console.error("[S2S] Network error:", err.message);
@@ -271,8 +287,12 @@ class ElevenLabsS2S {
 
     if (!response.ok) {
       let body = "";
-      try { body = await response.text(); } catch {}
-      console.error(`[S2S] API error ${response.status}: ${body.slice(0, 200)}`);
+      try {
+        body = await response.text();
+      } catch {}
+      console.error(
+        `[S2S] API error ${response.status}: ${body.slice(0, 200)}`,
+      );
       return;
     }
 
@@ -288,7 +308,7 @@ class ElevenLabsS2S {
         this.onAudioChunk(buf);
       }
       console.log(
-        `[S2S] Segment #${this._totalSegments} done | ${bytesReceived} bytes | TTFB ${ttfbMs}ms | total time ${Date.now() - t0}ms`
+        `[S2S] Segment #${this._totalSegments} done | ${bytesReceived} bytes | TTFB ${ttfbMs}ms | total time ${Date.now() - t0}ms`,
       );
     } catch (err) {
       if (
@@ -315,9 +335,13 @@ class ElevenLabsS2S {
   _computeRms(mulawBuffer) {
     if (mulawBuffer.length === 0) return 0;
     try {
-      const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
-      const pcm   = alawmulaw.mulaw.decode(uint8); // Int16Array
-      let sumSq   = 0;
+      const uint8 = new Uint8Array(
+        mulawBuffer.buffer,
+        mulawBuffer.byteOffset,
+        mulawBuffer.byteLength,
+      );
+      const pcm = alawmulaw.mulaw.decode(uint8); // Int16Array
+      let sumSq = 0;
       for (let i = 0; i < pcm.length; i++) sumSq += pcm[i] * pcm[i];
       return Math.sqrt(sumSq / pcm.length);
     } catch {
