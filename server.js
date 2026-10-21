@@ -47,7 +47,7 @@ const { dialClient, hangupCall } = require("./plivoClient");
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
 const { ElevenLabsS2S }   = require("./elevenLabsS2S");
-const { mulawToPcm16k, pcm24kToMulaw } = require("./audioUtils");
+const { mulawToPcm16k, pcm24kToMulaw, applyMulawNoiseGate } = require("./audioUtils");
 
 const PORT           = process.env.PORT || 8080;
 const MY_NUMBER      = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
@@ -61,8 +61,9 @@ const SARVAM_LANG    = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
 const ELEVEN_KEY    = process.env.ELEVEN_LABS_API;
 const ELEVEN_VOICE  = process.env.ELEVEN_LABS_VOICE_ID;
 const ELEVEN_MODEL  = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS    = parseInt(process.env.ELEVEN_LABS_SILENCE_MS    || "300", 10);
-const SPEECH_THRESH = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "200", 10);
+const SILENCE_MS    = parseInt(process.env.ELEVEN_LABS_SILENCE_MS       || "500",  10);
+const SPEECH_THRESH = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD  || "100",  10);
+const NOISE_GATE    = parseInt(process.env.ELEVEN_LABS_NOISE_GATE_RANGE  || "3",    10);
 
 if (!SARVAM_KEY)   console.warn("[Config] SARVAM_API_KEY not set");
 if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
@@ -92,37 +93,79 @@ const PENDING_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
  */
 const sessions = new Map();
 
-// ─── Audio Streamer (Jitter Buffer) ──────────────────────────────────────────
+// ─── Audio Streamer (Adaptive Jitter Buffer) ─────────────────────────────────
+//
+// Phase 2 improvements:
+//   • Pre-buffer 80ms of audio before starting playback (absorbs jitter bursts)
+//   • Larger 320-byte (40ms) chunks = fewer WebSocket sends = less overhead
+//   • Comfort noise on buffer underrun (prevents audible "dead air" gaps)
+//   • Buffer-depth monitoring to detect backpressure early
+//
 class AudioStreamer {
   constructor(ws, sessionId, label) {
-    this.ws        = ws;
-    this.sessionId = sessionId;
-    this.label     = label || "audio";
-    this.queue     = Buffer.alloc(0);
-    this.timer     = null;
-    this.chunkSize = 160;
-    this.interval  = 20;
+    this.ws          = ws;
+    this.sessionId   = sessionId;
+    this.label       = label || "audio";
+    this.queue       = Buffer.alloc(0);
+    this.timer       = null;
+    this.chunkSize   = 320;   // 40ms @ 8kHz μ-law — fewer sends, same throughput
+    this.interval    = 40;    // matches chunkSize duration exactly
+    this.preBuffer   = 320;   // 40ms pre-buffer before starting playback
+    this._preFilled  = false; // have we accumulated the pre-buffer yet?
+    this._underruns  = 0;     // count of comfort-noise insertions
   }
 
   addAudio(mulawBuffer) {
     this.queue = Buffer.concat([this.queue, mulawBuffer]);
-    if (!this.timer) this.startStreaming();
+
+    // Log buffer depth every ~5 seconds to detect backpressure
+    if (Math.random() < 0.01) {
+      const depthMs = (this.queue.length / this.chunkSize) * this.interval;
+      if (depthMs > 500) {
+        console.warn(`[AudioStreamer:${this.label}] Buffer depth ${depthMs.toFixed(0)}ms — potential backpressure`);
+      }
+    }
+
+    // Start streaming only after pre-buffer is filled (absorbs initial jitter)
+    if (!this._preFilled && this.queue.length >= this.preBuffer) {
+      this._preFilled = true;
+    }
+
+    if (this._preFilled && !this.timer) this._startStreaming();
   }
 
-  startStreaming() {
+  _startStreaming() {
     this.timer = setInterval(() => {
       if (this.queue.length >= this.chunkSize) {
         const chunk = this.queue.subarray(0, this.chunkSize);
         this.queue  = this.queue.subarray(this.chunkSize);
-        this.sendChunk(chunk);
-      } else if (this.queue.length === 0) {
-        clearInterval(this.timer);
-        this.timer = null;
+        this._sendChunk(chunk);
+      } else if (this.queue.length > 0) {
+        // Partial chunk — pad with silence rather than starve
+        const padded = Buffer.alloc(this.chunkSize, 127); // 127 = μ-law silence
+        this.queue.copy(padded);
+        this.queue = Buffer.alloc(0);
+        this._sendChunk(padded);
+      } else {
+        // Buffer empty — insert one frame of comfort noise rather than stopping
+        // This prevents the hard silence that sounds like "connection dropped"
+        this._underruns++;
+        const comfort = Buffer.alloc(this.chunkSize, 127);
+        this._sendChunk(comfort);
+
+        // But if we've had 10+ consecutive underruns (200ms+ of silence),
+        // the speaker has genuinely stopped — stop the timer to save bandwidth
+        if (this._underruns >= 10) {
+          clearInterval(this.timer);
+          this.timer      = null;
+          this._preFilled = false;
+          this._underruns = 0;
+        }
       }
     }, this.interval);
   }
 
-  sendChunk(chunk) {
+  _sendChunk(chunk) {
     if (this.ws && this.ws.readyState === 1) {
       this.ws.send(
         JSON.stringify({
@@ -134,13 +177,16 @@ class AudioStreamer {
           },
         }),
       );
+      this._underruns = 0; // reset underrun counter on successful send
     }
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    this.queue = Buffer.alloc(0);
+    this.timer      = null;
+    this.queue      = Buffer.alloc(0);
+    this._preFilled = false;
+    this._underruns = 0;
   }
 }
 
@@ -599,10 +645,13 @@ myWss.on("connection", (myWs, req) => {
             // === ELEVENLABS S2S FLOW ===
             if (session.s2s) {
               try {
-                const mulawBuf = Buffer.from(payload, "base64");
+                let mulawBuf = Buffer.from(payload, "base64");
+                // Phase 4: Apply noise gate before sending to ElevenLabs
+                // Suppresses background noise floor for cleaner modulation
+                mulawBuf = applyMulawNoiseGate(mulawBuf, NOISE_GATE);
                 session.s2s.addAudio(mulawBuf);
-                if (Math.random() < 0.05) {
-                  console.log(`[MyWS→S2S] Audio frame forwarded to ElevenLabs S2S (session: ${sessionId})`);
+                if (Math.random() < 0.02) {
+                  console.log(`[MyWS→S2S] Audio frame → ElevenLabs WS (session: ${sessionId})`);
                 }
               } catch (err) {
                 console.error("[MyWS→S2S] Error:", err.message);
@@ -715,8 +764,8 @@ clientWss.on("connection", (clientWs, req) => {
         }
         cur.streamer.addAudio(ulawChunk);
 
-        if (Math.random() < 0.05) {
-          console.log(`[S2S→Client] Buffered ElevenLabs modulated audio (session: ${sessionId})`);
+        if (Math.random() < 0.02) {
+          console.log(`[S2S→Client] Received modulated chunk → AudioStreamer (session: ${sessionId})`);
         }
       },
       {

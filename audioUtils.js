@@ -1,6 +1,9 @@
 const alawmulaw = require('alawmulaw');
 const { WaveFile } = require('wavefile');
 
+// Noise gate: μ-law silence byte (127 = 0 PCM after decode)
+const MULAW_SILENCE_BYTE = 127;
+
 /**
  * Decode μ-law 8kHz Buffer → PCM16 16kHz Buffer (for Sarvam STT).
  * Sarvam STT expects raw 16-bit little-endian PCM at 16kHz.
@@ -19,6 +22,49 @@ function mulawToPcm16k(mulawBuffer) {
   
   const pcm16k = wav.getSamples(false, Int16Array);
   return Buffer.from(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
+}
+
+/**
+ * Decode μ-law 8kHz Buffer → PCM16 16kHz as Int16Array (fast path).
+ * Used by the ElevenLabs WS streaming path — returns raw Int16Array
+ * to avoid an extra Buffer allocation round-trip.
+ *
+ * @param {Buffer} mulawBuffer - raw μ-law bytes from Plivo (base64-decoded)
+ * @returns {Int16Array}       - PCM16 at 16kHz
+ */
+function mulawToPcm16kRaw(mulawBuffer) {
+  const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
+  const pcm8k = alawmulaw.mulaw.decode(uint8); // Int16Array, 8kHz
+
+  // Simple 2x linear upsample (8k → 16k): insert interpolated sample between each pair
+  // This is intentionally lightweight for the streaming path (each chunk is tiny ~20ms)
+  const pcm16k = new Int16Array(pcm8k.length * 2);
+  for (let i = 0; i < pcm8k.length; i++) {
+    pcm16k[i * 2] = pcm8k[i];
+    // Linear interpolation between adjacent samples
+    const next = i + 1 < pcm8k.length ? pcm8k[i + 1] : pcm8k[i];
+    pcm16k[i * 2 + 1] = Math.round((pcm8k[i] + next) / 2);
+  }
+  return pcm16k;
+}
+
+/**
+ * Apply a simple noise gate to a μ-law buffer.
+ * Bytes within `gateRange` of the μ-law silence value (127) are replaced with silence.
+ * Suppresses background noise floor before sending to ElevenLabs.
+ *
+ * @param {Buffer} mulawBuffer
+ * @param {number} [gateRange=3]  - bytes around 127 to treat as silence
+ * @returns {Buffer}
+ */
+function applyMulawNoiseGate(mulawBuffer, gateRange = 3) {
+  const out = Buffer.from(mulawBuffer);
+  for (let i = 0; i < out.length; i++) {
+    if (Math.abs(out[i] - MULAW_SILENCE_BYTE) <= gateRange) {
+      out[i] = MULAW_SILENCE_BYTE;
+    }
+  }
+  return out;
 }
 
 /**
@@ -107,4 +153,4 @@ function mulawToWav16k(mulawBuffer) {
   return Buffer.from(wav.toBuffer());
 }
 
-module.exports = { mulawToPcm16k, pcm24kToMulaw, pcm8kToMulaw, mulawToWav16k, hasWavHeader, stripWavHeader };
+module.exports = { mulawToPcm16k, mulawToPcm16kRaw, pcm24kToMulaw, pcm8kToMulaw, mulawToWav16k, hasWavHeader, stripWavHeader, applyMulawNoiseGate };
