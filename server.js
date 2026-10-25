@@ -57,13 +57,19 @@ const SARVAM_KEY     = process.env.SARVAM_API_KEY;
 const SARVAM_SPEAKER = process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
 const SARVAM_LANG    = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
 
-// ElevenLabs Config
-const ELEVEN_KEY    = process.env.ELEVEN_LABS_API;
-const ELEVEN_VOICE  = process.env.ELEVEN_LABS_VOICE_ID;
-const ELEVEN_MODEL  = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS    = parseInt(process.env.ELEVEN_LABS_SILENCE_MS       || "500",  10);
-const SPEECH_THRESH = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD  || "100",  10);
-const NOISE_GATE    = parseInt(process.env.ELEVEN_LABS_NOISE_GATE_RANGE  || "3",    10);
+// ElevenLabs Config & Low-Latency Tuning
+const ELEVEN_KEY        = process.env.ELEVEN_LABS_API;
+const ELEVEN_VOICE      = process.env.ELEVEN_LABS_VOICE_ID;
+const ELEVEN_MODEL      = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
+const SILENCE_MS        = parseInt(process.env.ELEVEN_LABS_SILENCE_MS        || "220",  10);
+const SPEECH_THRESH     = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD  || "100",  10);
+const NOISE_GATE        = parseInt(process.env.ELEVEN_LABS_NOISE_GATE_RANGE  || "3",    10);
+const MAX_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MAX_SPEECH_MS     || "2000", 10);
+const MIN_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MIN_SPEECH_MS     || "120",  10);
+const LATENCY_LEVEL     = parseInt(process.env.ELEVEN_LABS_LATENCY_LEVEL      || "3",    10);
+const SIMILARITY_BOOST  = parseFloat(process.env.ELEVEN_LABS_SIMILARITY_BOOST || "0.80");
+const STABILITY         = parseFloat(process.env.ELEVEN_LABS_STABILITY       || "0.70");
+const PREBUFFER_MS      = parseInt(process.env.AUDIO_STREAMER_PREBUFFER_MS   || "80",   10);
 
 if (!SARVAM_KEY)   console.warn("[Config] SARVAM_API_KEY not set");
 if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
@@ -102,7 +108,7 @@ const sessions = new Map();
 //   • Buffer-depth monitoring to detect backpressure early
 //
 class AudioStreamer {
-  constructor(ws, sessionId, label) {
+  constructor(ws, sessionId, label, options = {}) {
     this.ws          = ws;
     this.sessionId   = sessionId;
     this.label       = label || "audio";
@@ -110,7 +116,9 @@ class AudioStreamer {
     this.timer       = null;
     this.chunkSize   = 320;   // 40ms @ 8kHz μ-law — fewer sends, same throughput
     this.interval    = 40;    // matches chunkSize duration exactly
-    this.preBuffer   = 320;   // 40ms pre-buffer before starting playback
+    const preMs      = options.preBufferMs || PREBUFFER_MS || 80;
+    // 80ms @ 8kHz μ-law = 640 bytes (minimum 320 bytes = 1 frame)
+    this.preBuffer   = Math.max(320, Math.round((preMs / 1000) * 8000));
     this._preFilled  = false; // have we accumulated the pre-buffer yet?
     this._underruns  = 0;     // count of comfort-noise insertions
   }
@@ -147,15 +155,14 @@ class AudioStreamer {
         this.queue = Buffer.alloc(0);
         this._sendChunk(padded);
       } else {
-        // Buffer empty — insert one frame of comfort noise rather than stopping
-        // This prevents the hard silence that sounds like "connection dropped"
+        // Buffer empty — insert brief comfort noise (up to 2 frames = 80ms) to prevent clicks
+        // Stop promptly so queued silence doesn't delay subsequent incoming speech
         this._underruns++;
-        const comfort = Buffer.alloc(this.chunkSize, 127);
-        this._sendChunk(comfort);
-
-        // But if we've had 10+ consecutive underruns (200ms+ of silence),
-        // the speaker has genuinely stopped — stop the timer to save bandwidth
-        if (this._underruns >= 10) {
+        if (this._underruns <= 2) {
+          const comfort = Buffer.alloc(this.chunkSize, 127);
+          this._sendChunk(comfort);
+        } else {
+          // Pause timer when speaker has finished to avoid buffering dead air
           clearInterval(this.timer);
           this.timer      = null;
           this._preFilled = false;
@@ -319,6 +326,10 @@ app.get("/api/engine", (req, res) => {
         model:           ELEVEN_MODEL,
         silenceMs:       SILENCE_MS,
         speechThreshold: SPEECH_THRESH,
+        maxSpeechMs:     MAX_SPEECH_MS,
+        minSpeechMs:     MIN_SPEECH_MS,
+        latencyLevel:    LATENCY_LEVEL,
+        preBufferMs:     PREBUFFER_MS,
         isConfigured:    Boolean(ELEVEN_KEY && ELEVEN_VOICE),
       },
       sarvam: {
@@ -597,7 +608,7 @@ myWss.on("connection", (myWs, req) => {
           sttWs:          null,
           ttsWs:          null,
           s2s:            null,
-          streamer:       new AudioStreamer(null, sessionId, "client"),
+          streamer:       new AudioStreamer(null, sessionId, "client", { preBufferMs: PREBUFFER_MS }),
           clientNumber,
           myCallUuid:     callUUID,
           clientCallUuid: null,
@@ -771,6 +782,11 @@ clientWss.on("connection", (clientWs, req) => {
       {
         silenceDurationMs: SILENCE_MS,
         speechThreshold:   SPEECH_THRESH,
+        maxSpeechMs:       MAX_SPEECH_MS,
+        minSpeechMs:       MIN_SPEECH_MS,
+        latencyLevel:      LATENCY_LEVEL,
+        similarityBoost:   SIMILARITY_BOOST,
+        stability:         STABILITY,
         modelId:           ELEVEN_MODEL,
       },
     );
