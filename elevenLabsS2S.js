@@ -1,36 +1,27 @@
 // elevenLabsS2S.js
-// ElevenLabs Speech-to-Speech — Low Latency (2.0s - 2.8s) Streaming Pipeline
+// ElevenLabs Speech-to-Speech — Smooth Real-Time Streaming Pipeline
 //
-// Optimizations for Target 2.0s - 2.8s Latency:
-//
-//  1. Fast VAD & Clause Splitting:
-//     - 60ms hangover (VAD_HANGOVER_FRAMES = 3) prevents syllable clipping while shaving 60ms.
-//     - silenceDurationMs = 220ms (down from 500ms) eliminates awkward pause delay.
-//     - maxSpeechMs = 2000ms (down from 4000ms) splits continuous speech into ~2s natural clauses.
-//
-//  2. High-Performance TTFB:
-//     - Smaller ~2s audio payloads reduce ElevenLabs S2S inference time by ~40% (TTFB ~450-600ms).
-//     - optimize_streaming_latency = 3 gives near-instantaneous streaming start.
-//
-//  3. Strict Chronological Ordered Streaming:
-//     - Parallel requests to ElevenLabs are tracked via _orderedSegments.
-//     - Audio chunks from concurrent segments never interleave or collide.
-//     - As Segment 1 finishes, Segment 2's pre-buffered chunks immediately drain into AudioStreamer.
-//
-//  4. Voice Quality Guardrails:
-//     - Stability (0.70) and Similarity Boost (0.80) prevent robotic drift or telephone aliasing.
-//     - μ-law noise gate prevents background hiss from keeping VAD open.
+// Key Stability & Quality Enhancements:
+//  1. Natural Word-Boundary Splitting:
+//     - Avoids blind mid-word chops. If speech exceeds maxSpeechMs (3.5s), it waits
+//       for a natural syllable/energy dip (rms < 250) before flushing.
+//     - Normal phrases (1.5s - 3.0s) flush naturally on breath/pause (silenceDurationMs = 260ms).
+//  2. Hangover Protection:
+//     - 4 frames (80ms) hangover preserves soft consonant endings ('t', 'k', 's') without cutoffs.
+//  3. Clean Acoustic Pipeline:
+//     - Raw uncorrupted audio fed to ElevenLabs.
+//     - remove_background_noise defaults to false to prevent watery phase distortion on telephone audio.
+//  4. Strict Chronological Ordered Streaming:
+//     - Concurrent API responses never interleave or collide.
 
 const alawmulaw = require("alawmulaw");
 const { mulawToWav16k } = require("./audioUtils");
 
-// VAD hangover: consecutive below-threshold frames before entering silence mode.
-// At 20ms/frame: 3 frames = 60ms hangover.
-// Prevents mid-word cuts on soft consonants while removing dead-air latency.
-const VAD_HANGOVER_FRAMES = 3;
+// VAD hangover: 4 frames @ 20ms = 80ms hangover.
+// Prevents mid-word cuts on soft consonants while maintaining responsive pause detection.
+const VAD_HANGOVER_FRAMES = 4;
 
 // Max concurrent ElevenLabs API requests (pipeline parallelism).
-// Allows preparing the next 2s clause while the previous one is streaming.
 const MAX_CONCURRENT = 2;
 
 /**
@@ -40,13 +31,14 @@ const MAX_CONCURRENT = 2;
  * @param {string}   voiceId       - ELEVEN_LABS_VOICE_ID env var
  * @param {function} onAudioChunk  - Called with each Buffer of μ-law 8kHz audio in strict order
  * @param {object}   [options]
- * @param {number}   [options.silenceDurationMs=220]    - ms of silence before flush
+ * @param {number}   [options.silenceDurationMs=260]    - ms of silence before flush
  * @param {number}   [options.speechThreshold=100]      - RMS energy above = speech
  * @param {number}   [options.minSpeechMs=120]          - ignore utterances shorter than this
- * @param {number}   [options.maxSpeechMs=2000]         - clause split cap for low latency
+ * @param {number}   [options.maxSpeechMs=3500]         - continuous speech target before clause boundary
  * @param {number}   [options.latencyLevel=3]           - ElevenLabs optimize_streaming_latency (0-4)
  * @param {number}   [options.similarityBoost=0.80]     - Voice similarity boost
  * @param {number}   [options.stability=0.70]           - Voice stability
+ * @param {boolean}  [options.removeBackgroundNoise]    - filter noise (false recommended for telephony)
  * @param {string}   [options.modelId]                  - ElevenLabs STS model
  */
 class ElevenLabsS2S {
@@ -55,22 +47,22 @@ class ElevenLabsS2S {
     this.voiceId = voiceId;
     this.onAudioChunk = onAudioChunk;
 
-    // VAD config — tuned for telephone-quality audio & 2.0s - 2.8s total latency
-    this.silenceDurationMs = options.silenceDurationMs ?? 220;
-    this.speechThreshold   = options.speechThreshold ?? 100;
-    this.minSpeechMs       = options.minSpeechMs ?? 120;
-    this.maxSpeechMs       = options.maxSpeechMs ?? 2000;
-    this.modelId           = options.modelId ?? "eleven_multilingual_sts_v2";
-    this.latencyLevel      = options.latencyLevel ?? 3;
-    this.similarityBoost   = options.similarityBoost ?? 0.80;
-    this.stability         = options.stability ?? 0.70;
+    // VAD config — tuned for telephone-quality audio & natural phrasing
+    this.silenceDurationMs      = options.silenceDurationMs ?? 260;
+    this.speechThreshold        = options.speechThreshold ?? 100;
+    this.minSpeechMs            = options.minSpeechMs ?? 120;
+    this.maxSpeechMs            = options.maxSpeechMs ?? 3500;
+    this.modelId                = options.modelId ?? "eleven_multilingual_sts_v2";
+    this.latencyLevel           = options.latencyLevel ?? 3;
+    this.similarityBoost        = options.similarityBoost ?? 0.80;
+    this.stability              = options.stability ?? 0.70;
+    this.removeBackgroundNoise  = options.removeBackgroundNoise ?? (process.env.ELEVEN_LABS_REMOVE_NOISE === "true");
 
     // VAD state
     this._speechBuffers    = []; // Array<Buffer> — accumulated μ-law chunks
     this._isSpeaking       = false;
     this._speechStart      = 0;  // Date.now() when speech began
     this._silenceTimer     = null;
-    this._maxTimer         = null;
     this._hangoverCount    = 0;
 
     // Ordered segment playback queue to prevent chunk interleaving across concurrent requests
@@ -104,7 +96,7 @@ class ElevenLabsS2S {
 
     if (isSpeech) {
       this._hangoverCount = 0;
-      this._onSpeechChunk(mulawBuffer);
+      this._onSpeechChunk(mulawBuffer, rms);
     } else {
       this._onSilenceChunk(mulawBuffer);
     }
@@ -127,31 +119,39 @@ class ElevenLabsS2S {
 
   // ─── VAD Internals ──────────────────────────────────────────────────────────
 
-  _onSpeechChunk(mulawBuffer) {
-    // Cancel any pending silence flush — still actively speaking
+  _onSpeechChunk(mulawBuffer, rms) {
+    // Cancel any pending silence flush — caller is actively speaking
     if (this._silenceTimer) {
       clearTimeout(this._silenceTimer);
       this._silenceTimer = null;
     }
 
+    const now = Date.now();
     if (!this._isSpeaking) {
-      // Transition to SPEAKING
       this._isSpeaking = true;
-      this._speechStart = Date.now();
+      this._speechStart = now;
       this._speechBuffers = [];
       console.log("[S2S] VAD: speech started");
-
-      // Natural clause cap: flush after maxSpeechMs even mid-sentence
-      // 2.0s segments drastically reduce TTFB and perceived latency without audio chops
-      this._maxTimer = setTimeout(() => {
-        console.log(
-          `[S2S] VAD: max clause duration (${this.maxSpeechMs}ms) — clause flush`,
-        );
-        this._flush();
-      }, this.maxSpeechMs);
     }
 
     this._speechBuffers.push(mulawBuffer);
+
+    // Natural word-boundary detection for long utterances:
+    // If continuous speech reaches maxSpeechMs, wait for an acoustic valley (rms < 250)
+    // rather than abruptly cutting in the middle of a vowel.
+    // Hard cutoff fallback triggers if utterance exceeds maxSpeechMs + 800ms.
+    const elapsed = now - this._speechStart;
+    if (elapsed >= this.maxSpeechMs) {
+      const isWordBoundary = rms < 250;
+      const isHardLimit    = elapsed >= (this.maxSpeechMs + 800);
+
+      if (isWordBoundary || isHardLimit) {
+        console.log(
+          `[S2S] VAD: clause split at ${elapsed}ms (${isWordBoundary ? "word boundary" : "max limit"})`,
+        );
+        this._flush();
+      }
+    }
   }
 
   _onSilenceChunk(mulawBuffer) {
@@ -168,7 +168,7 @@ class ElevenLabsS2S {
     // Trailing silence frame so the utterance ends naturally
     this._speechBuffers.push(mulawBuffer);
 
-    // Arm silence timer (220ms)
+    // Arm silence timer (260ms)
     if (!this._silenceTimer) {
       this._silenceTimer = setTimeout(() => {
         console.log(`[S2S] VAD: pause detected (${this.silenceDurationMs}ms) — flushing clause`);
@@ -235,10 +235,6 @@ class ElevenLabsS2S {
       clearTimeout(this._silenceTimer);
       this._silenceTimer = null;
     }
-    if (this._maxTimer) {
-      clearTimeout(this._maxTimer);
-      this._maxTimer = null;
-    }
   }
 
   // ─── ElevenLabs API & Ordered Streaming ─────────────────────────────────────
@@ -292,7 +288,9 @@ class ElevenLabsS2S {
         use_speaker_boost: true,
       }),
     );
-    form.append("remove_background_noise", "true");
+    if (this.removeBackgroundNoise) {
+      form.append("remove_background_noise", "true");
+    }
 
     const t0 = Date.now();
     let response;

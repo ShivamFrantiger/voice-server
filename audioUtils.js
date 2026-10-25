@@ -49,19 +49,22 @@ function mulawToPcm16kRaw(mulawBuffer) {
 }
 
 /**
- * Apply a simple noise gate to a μ-law buffer.
- * Bytes within `gateRange` of the μ-law silence value (127) are replaced with silence.
- * Suppresses background noise floor before sending to ElevenLabs.
+ * Apply a noise gate to a μ-law buffer.
+ * In G.711 μ-law, 255 (positive 0) and 127 (negative 0) represent zero amplitude.
+ * Values near zero are [255 - gateRange .. 255] and [127 - gateRange .. 127].
+ * Bytes 128..135 are high positive amplitudes (+32,000 PCM) and MUST NOT be zeroed.
  *
  * @param {Buffer} mulawBuffer
- * @param {number} [gateRange=3]  - bytes around 127 to treat as silence
+ * @param {number} [gateRange=3]
  * @returns {Buffer}
  */
 function applyMulawNoiseGate(mulawBuffer, gateRange = 3) {
   const out = Buffer.from(mulawBuffer);
   for (let i = 0; i < out.length; i++) {
-    if (Math.abs(out[i] - MULAW_SILENCE_BYTE) <= gateRange) {
-      out[i] = MULAW_SILENCE_BYTE;
+    const b = out[i];
+    // Check if within gateRange of negative zero (127) or positive zero (255)
+    if ((b <= 127 && b >= 127 - gateRange) || (b <= 255 && b >= 255 - gateRange)) {
+      out[i] = 255; // 255 = standard μ-law silence
     }
   }
   return out;

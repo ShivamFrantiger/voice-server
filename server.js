@@ -61,15 +61,15 @@ const SARVAM_LANG    = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
 const ELEVEN_KEY        = process.env.ELEVEN_LABS_API;
 const ELEVEN_VOICE      = process.env.ELEVEN_LABS_VOICE_ID;
 const ELEVEN_MODEL      = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS        = parseInt(process.env.ELEVEN_LABS_SILENCE_MS        || "220",  10);
+const SILENCE_MS        = parseInt(process.env.ELEVEN_LABS_SILENCE_MS        || "260",  10);
 const SPEECH_THRESH     = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD  || "100",  10);
-const NOISE_GATE        = parseInt(process.env.ELEVEN_LABS_NOISE_GATE_RANGE  || "3",    10);
-const MAX_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MAX_SPEECH_MS     || "2000", 10);
+const NOISE_GATE        = parseInt(process.env.ELEVEN_LABS_NOISE_GATE_RANGE  || "0",    10);
+const MAX_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MAX_SPEECH_MS     || "3500", 10);
 const MIN_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MIN_SPEECH_MS     || "120",  10);
 const LATENCY_LEVEL     = parseInt(process.env.ELEVEN_LABS_LATENCY_LEVEL      || "3",    10);
 const SIMILARITY_BOOST  = parseFloat(process.env.ELEVEN_LABS_SIMILARITY_BOOST || "0.80");
 const STABILITY         = parseFloat(process.env.ELEVEN_LABS_STABILITY       || "0.70");
-const PREBUFFER_MS      = parseInt(process.env.AUDIO_STREAMER_PREBUFFER_MS   || "80",   10);
+const PREBUFFER_MS      = parseInt(process.env.AUDIO_STREAMER_PREBUFFER_MS   || "160",  10);
 
 if (!SARVAM_KEY)   console.warn("[Config] SARVAM_API_KEY not set");
 if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
@@ -109,64 +109,62 @@ const sessions = new Map();
 //
 class AudioStreamer {
   constructor(ws, sessionId, label, options = {}) {
-    this.ws          = ws;
-    this.sessionId   = sessionId;
-    this.label       = label || "audio";
-    this.queue       = Buffer.alloc(0);
-    this.timer       = null;
-    this.chunkSize   = 320;   // 40ms @ 8kHz μ-law — fewer sends, same throughput
-    this.interval    = 40;    // matches chunkSize duration exactly
-    const preMs      = options.preBufferMs || PREBUFFER_MS || 80;
-    // 80ms @ 8kHz μ-law = 640 bytes (minimum 320 bytes = 1 frame)
-    this.preBuffer   = Math.max(320, Math.round((preMs / 1000) * 8000));
-    this._preFilled  = false; // have we accumulated the pre-buffer yet?
-    this._underruns  = 0;     // count of comfort-noise insertions
+    this.ws           = ws;
+    this.sessionId    = sessionId;
+    this.label        = label || "audio";
+    this.queue        = Buffer.alloc(0);
+    this.timer        = null;
+    this.chunkSize    = 320;   // 40ms @ 8kHz μ-law (320 bytes)
+    this.interval     = 40;    // 40ms send cadence
+    const preMs       = options.preBufferMs || PREBUFFER_MS || 160;
+    // 160ms @ 8kHz μ-law = 1280 bytes
+    this.preBuffer    = Math.max(320, Math.round((preMs / 1000) * 8000));
+    this._isStreaming = false;
+    this._idleCount    = 0;
   }
 
   addAudio(mulawBuffer) {
+    if (!mulawBuffer || mulawBuffer.length === 0) return;
     this.queue = Buffer.concat([this.queue, mulawBuffer]);
 
-    // Log buffer depth every ~5 seconds to detect backpressure
-    if (Math.random() < 0.01) {
-      const depthMs = (this.queue.length / this.chunkSize) * this.interval;
-      if (depthMs > 500) {
-        console.warn(`[AudioStreamer:${this.label}] Buffer depth ${depthMs.toFixed(0)}ms — potential backpressure`);
-      }
+    // Start streaming once pre-buffer threshold is reached
+    if (!this._isStreaming && this.queue.length >= this.preBuffer) {
+      this._startStreaming();
     }
-
-    // Start streaming only after pre-buffer is filled (absorbs initial jitter)
-    if (!this._preFilled && this.queue.length >= this.preBuffer) {
-      this._preFilled = true;
-    }
-
-    if (this._preFilled && !this.timer) this._startStreaming();
   }
 
   _startStreaming() {
+    if (this._isStreaming) return;
+    this._isStreaming = true;
+    this._idleCount   = 0;
+
+    if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       if (this.queue.length >= this.chunkSize) {
+        // Send exactly one 40ms frame (320 bytes)
         const chunk = this.queue.subarray(0, this.chunkSize);
         this.queue  = this.queue.subarray(this.chunkSize);
         this._sendChunk(chunk);
+        this._idleCount = 0;
       } else if (this.queue.length > 0) {
-        // Partial chunk — pad with silence rather than starve
-        const padded = Buffer.alloc(this.chunkSize, 127); // 127 = μ-law silence
-        this.queue.copy(padded);
-        this.queue = Buffer.alloc(0);
-        this._sendChunk(padded);
+        // Partial chunk in buffer (< 320 bytes).
+        // CRITICAL FIX: DO NOT wipe or pad with silence while streaming!
+        // Keep partial bytes so next incoming audio chunk appends seamlessly.
+        this._idleCount++;
+        // If no new audio arrives for 200ms (5 ticks), the utterance has finished
+        if (this._idleCount >= 5) {
+          const padded = Buffer.alloc(this.chunkSize, 255); // 255 = standard μ-law silence
+          this.queue.copy(padded);
+          this.queue = Buffer.alloc(0);
+          this._sendChunk(padded);
+          this._stopStreaming();
+        }
       } else {
-        // Buffer empty — insert brief comfort noise (up to 2 frames = 80ms) to prevent clicks
-        // Stop promptly so queued silence doesn't delay subsequent incoming speech
-        this._underruns++;
-        if (this._underruns <= 2) {
-          const comfort = Buffer.alloc(this.chunkSize, 127);
-          this._sendChunk(comfort);
-        } else {
-          // Pause timer when speaker has finished to avoid buffering dead air
-          clearInterval(this.timer);
-          this.timer      = null;
-          this._preFilled = false;
-          this._underruns = 0;
+        // Buffer is completely empty (0 bytes)
+        this._idleCount++;
+        // If queue remains empty for 3 ticks (120ms), sleep until next audio arrives
+        if (this._idleCount >= 3) {
+          this._stopStreaming();
         }
       }
     }, this.interval);
@@ -184,16 +182,19 @@ class AudioStreamer {
           },
         }),
       );
-      this._underruns = 0; // reset underrun counter on successful send
     }
   }
 
-  stop() {
+  _stopStreaming() {
     if (this.timer) clearInterval(this.timer);
-    this.timer      = null;
-    this.queue      = Buffer.alloc(0);
-    this._preFilled = false;
-    this._underruns = 0;
+    this.timer        = null;
+    this._isStreaming = false;
+    this._idleCount   = 0;
+  }
+
+  stop() {
+    this._stopStreaming();
+    this.queue = Buffer.alloc(0);
   }
 }
 
@@ -657,9 +658,10 @@ myWss.on("connection", (myWs, req) => {
             if (session.s2s) {
               try {
                 let mulawBuf = Buffer.from(payload, "base64");
-                // Phase 4: Apply noise gate before sending to ElevenLabs
-                // Suppresses background noise floor for cleaner modulation
-                mulawBuf = applyMulawNoiseGate(mulawBuf, NOISE_GATE);
+                // Noise gate only applied if NOISE_GATE > 0 (disabled by default for pristine audio)
+                if (NOISE_GATE > 0) {
+                  mulawBuf = applyMulawNoiseGate(mulawBuf, NOISE_GATE);
+                }
                 session.s2s.addAudio(mulawBuf);
                 if (Math.random() < 0.02) {
                   console.log(`[MyWS→S2S] Audio frame → ElevenLabs WS (session: ${sessionId})`);
@@ -780,14 +782,15 @@ clientWss.on("connection", (clientWs, req) => {
         }
       },
       {
-        silenceDurationMs: SILENCE_MS,
-        speechThreshold:   SPEECH_THRESH,
-        maxSpeechMs:       MAX_SPEECH_MS,
-        minSpeechMs:       MIN_SPEECH_MS,
-        latencyLevel:      LATENCY_LEVEL,
-        similarityBoost:   SIMILARITY_BOOST,
-        stability:         STABILITY,
-        modelId:           ELEVEN_MODEL,
+        silenceDurationMs:     SILENCE_MS,
+        speechThreshold:       SPEECH_THRESH,
+        maxSpeechMs:           MAX_SPEECH_MS,
+        minSpeechMs:           MIN_SPEECH_MS,
+        latencyLevel:          LATENCY_LEVEL,
+        similarityBoost:       SIMILARITY_BOOST,
+        stability:             STABILITY,
+        removeBackgroundNoise: process.env.ELEVEN_LABS_REMOVE_NOISE === "true",
+        modelId:               ELEVEN_MODEL,
       },
     );
     session.s2s = s2s;
