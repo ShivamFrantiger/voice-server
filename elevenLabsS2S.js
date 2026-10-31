@@ -1,5 +1,5 @@
-// elevenLabsS2S.js
-// ElevenLabs Speech-to-Speech — Smooth Real-Time Streaming Pipeline
+﻿// elevenLabsS2S.js
+// ElevenLabs Speech-to-Speech â€” Smooth Real-Time Streaming Pipeline
 //
 // Key Stability & Quality Enhancements:
 //  1. Natural Word-Boundary Splitting:
@@ -17,19 +17,19 @@
 const alawmulaw = require("alawmulaw");
 const { mulawToWav16k } = require("./audioUtils");
 
-// VAD hangover: 4 frames @ 20ms = 80ms hangover.
-// Prevents mid-word cuts on soft consonants while maintaining responsive pause detection.
-const VAD_HANGOVER_FRAMES = 4;
+// VAD hangover: 2 frames @ 20ms = 40ms hangover.
+// [FIX 1] Reduced from 4->2 frames: saves 40ms per flush, still protects soft consonant endings.
+const VAD_HANGOVER_FRAMES = 2;
 
 // Max concurrent ElevenLabs API requests (pipeline parallelism).
 const MAX_CONCURRENT = 2;
 
 /**
- * ElevenLabsS2S — Low-Latency Speech-to-Speech with ordered segment streaming
+ * ElevenLabsS2S â€” Low-Latency Speech-to-Speech with ordered segment streaming
  *
  * @param {string}   apiKey        - ELEVEN_LABS_API env var
  * @param {string}   voiceId       - ELEVEN_LABS_VOICE_ID env var
- * @param {function} onAudioChunk  - Called with each Buffer of μ-law 8kHz audio in strict order
+ * @param {function} onAudioChunk  - Called with each Buffer of Î¼-law 8kHz audio in strict order
  * @param {object}   [options]
  * @param {number}   [options.silenceDurationMs=260]    - ms of silence before flush
  * @param {number}   [options.speechThreshold=100]      - RMS energy above = speech
@@ -47,7 +47,7 @@ class ElevenLabsS2S {
     this.voiceId = voiceId;
     this.onAudioChunk = onAudioChunk;
 
-    // VAD config — tuned for telephone-quality audio & natural phrasing
+    // VAD config â€” tuned for telephone-quality audio & natural phrasing
     this.silenceDurationMs      = options.silenceDurationMs ?? 260;
     this.speechThreshold        = options.speechThreshold ?? 100;
     this.minSpeechMs            = options.minSpeechMs ?? 120;
@@ -57,12 +57,9 @@ class ElevenLabsS2S {
     this.similarityBoost        = options.similarityBoost ?? 0.80;
     this.stability              = options.stability ?? 0.70;
     this.removeBackgroundNoise  = options.removeBackgroundNoise ?? (process.env.ELEVEN_LABS_REMOVE_NOISE === "true");
-    this.onSpeechStart          = options.onSpeechStart ?? null;
 
     // VAD state
-    this._speechBuffers    = []; // Array<Buffer> — accumulated μ-law chunks
-    this._preRollBuffers   = []; // Rolling ring buffer to preserve opening consonants/words
-    this._maxPreRollFrames = 4;  // 4 frames @ 20ms = 80ms lead-in
+    this._speechBuffers    = []; // Array<Buffer> â€” accumulated Î¼-law chunks
     this._isSpeaking       = false;
     this._speechStart      = 0;  // Date.now() when speech began
     this._silenceTimer     = null;
@@ -83,10 +80,10 @@ class ElevenLabsS2S {
     );
   }
 
-  // ─── Public API ─────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Feed one μ-law chunk (raw bytes, NOT base64) from Plivo into the VAD.
+   * Feed one Î¼-law chunk (raw bytes, NOT base64) from Plivo into the VAD.
    * Call this for every 'inbound' media frame from the agent WebSocket.
    *
    * @param {Buffer} mulawBuffer
@@ -112,7 +109,6 @@ class ElevenLabsS2S {
     this._destroyed = true;
     this._clearTimers();
     this._speechBuffers = [];
-    this._preRollBuffers = [];
     this._orderedSegments = [];
     this._isSpeaking = false;
     const uptime = ((Date.now() - this._sessionStart) / 1000).toFixed(1);
@@ -121,10 +117,10 @@ class ElevenLabsS2S {
     );
   }
 
-  // ─── VAD Internals ──────────────────────────────────────────────────────────
+  // â”€â”€â”€ VAD Internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   _onSpeechChunk(mulawBuffer, rms) {
-    // Cancel any pending silence flush — caller is actively speaking
+    // Cancel any pending silence flush â€” caller is actively speaking
     if (this._silenceTimer) {
       clearTimeout(this._silenceTimer);
       this._silenceTimer = null;
@@ -134,14 +130,11 @@ class ElevenLabsS2S {
     if (!this._isSpeaking) {
       this._isSpeaking = true;
       this._speechStart = now;
-      // Prepend pre-roll lead-in frames so opening soft consonants are 100% preserved
-      this._speechBuffers = [...this._preRollBuffers, mulawBuffer];
-      this._preRollBuffers = [];
-      console.log(`[S2S] VAD: speech started (lead-in=${this._speechBuffers.length - 1} frames)`);
-      try { this.onSpeechStart?.(); } catch (err) { console.error("[S2S] onSpeechStart error:", err.message); }
-    } else {
-      this._speechBuffers.push(mulawBuffer);
+      this._speechBuffers = [];
+      console.log("[S2S] VAD: speech started");
     }
+
+    this._speechBuffers.push(mulawBuffer);
 
     // Natural word-boundary detection for long utterances:
     // If continuous speech reaches maxSpeechMs, wait for an acoustic valley (rms < 250)
@@ -162,14 +155,7 @@ class ElevenLabsS2S {
   }
 
   _onSilenceChunk(mulawBuffer) {
-    if (!this._isSpeaking) {
-      // Accumulate recent silence frames so when speech begins, opening syllables are intact
-      this._preRollBuffers.push(mulawBuffer);
-      if (this._preRollBuffers.length > this._maxPreRollFrames) {
-        this._preRollBuffers.shift();
-      }
-      return;
-    }
+    if (!this._isSpeaking) return;
 
     // Hangover: keep accumulating for VAD_HANGOVER_FRAMES before treating as silence
     // Prevents cuts on soft consonants / word endings
@@ -185,7 +171,7 @@ class ElevenLabsS2S {
     // Arm silence timer (260ms)
     if (!this._silenceTimer) {
       this._silenceTimer = setTimeout(() => {
-        console.log(`[S2S] VAD: pause detected (${this.silenceDurationMs}ms) — flushing clause`);
+        console.log(`[S2S] VAD: pause detected (${this.silenceDurationMs}ms) â€” flushing clause`);
         this._flush();
       }, this.silenceDurationMs);
     }
@@ -193,7 +179,6 @@ class ElevenLabsS2S {
 
   _flush() {
     this._clearTimers();
-    this._preRollBuffers = [];
 
     if (!this._isSpeaking || this._speechBuffers.length === 0) return;
 
@@ -207,7 +192,7 @@ class ElevenLabsS2S {
 
     if (speechDurationMs < this.minSpeechMs) {
       console.log(
-        `[S2S] VAD: segment too short (${speechDurationMs}ms) — skipping`,
+        `[S2S] VAD: segment too short (${speechDurationMs}ms) â€” skipping`,
       );
       return;
     }
@@ -252,10 +237,10 @@ class ElevenLabsS2S {
     }
   }
 
-  // ─── ElevenLabs API & Ordered Streaming ─────────────────────────────────────
+  // â”€â”€â”€ ElevenLabs API & Ordered Streaming â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Convert μ-law buffers → WAV → POST to ElevenLabs S2S → stream back ulaw_8000.
+   * Convert Î¼-law buffers â†’ WAV â†’ POST to ElevenLabs S2S â†’ stream back ulaw_8000.
    * Output chunks are emitted in strict chronological order through _emitChunk.
    *
    * @param {object}   segRecord
@@ -273,7 +258,7 @@ class ElevenLabsS2S {
       return;
     }
 
-    // Convert μ-law 8kHz → PCM WAV 16kHz
+    // Convert Î¼-law 8kHz â†’ PCM WAV 16kHz
     let wavBuffer;
     try {
       wavBuffer = mulawToWav16k(combined);
@@ -410,13 +395,13 @@ class ElevenLabsS2S {
     }
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
-   * Compute RMS energy of a μ-law buffer by decoding to PCM16 first.
+   * Compute RMS energy of a Î¼-law buffer by decoding to PCM16 first.
    *
    * @param {Buffer} mulawBuffer
-   * @returns {number} RMS value (0–32767)
+   * @returns {number} RMS value (0â€“32767)
    */
   _computeRms(mulawBuffer) {
     if (mulawBuffer.length === 0) return 0;
