@@ -1,4 +1,4 @@
-﻿// elevenLabsS2S.js
+// elevenLabsS2S.js
 // ElevenLabs Speech-to-Speech â€” Smooth Real-Time Streaming Pipeline
 //
 // Key Stability & Quality Enhancements:
