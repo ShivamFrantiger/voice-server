@@ -9,17 +9,21 @@ const path = require("path");
 class FillerManager {
   constructor() {
     this.fillersMap = new Map(); // id -> Buffer (raw u-law 8kHz)
-    this.fillerKeys = [];        // Array of IDs
-    this.deck       = [];        // Shuffled deck of IDs
-    this.lastFiller = null;      // Last played filler ID across all calls
+    this.fillerKeys = []; // Array of IDs
+    this.deck = []; // Shuffled deck of IDs
+    this.lastFiller = null; // Last played filler ID across all calls
 
     // Per-session tracking: sessionId -> state
     this.sessions = new Map();
 
     // Default configuration (can be customized via .env)
-    this.enabled           = (process.env.FILLER_ENABLED || "true").toLowerCase() === "true";
-    this.thresholdMs       = parseInt(process.env.FILLER_LATENCY_THRESHOLD_MS || "1000", 10);
-    this.cooldownMs        = parseInt(process.env.FILLER_COOLDOWN_MS          || "8000", 10);
+    this.enabled =
+      (process.env.FILLER_ENABLED || "true").toLowerCase() === "true";
+    this.thresholdMs = parseInt(
+      process.env.FILLER_LATENCY_THRESHOLD_MS || "1000",
+      10,
+    );
+    this.cooldownMs = parseInt(process.env.FILLER_COOLDOWN_MS || "8000", 10);
   }
 
   /**
@@ -31,7 +35,9 @@ class FillerManager {
   init(dirPath) {
     const targetDir = dirPath || path.join(__dirname, "fillers");
     if (!fs.existsSync(targetDir)) {
-      console.warn(`[FillerManager] Fillers directory not found at: ${targetDir}`);
+      console.warn(
+        `[FillerManager] Fillers directory not found at: ${targetDir}`,
+      );
       return;
     }
 
@@ -50,7 +56,7 @@ class FillerManager {
     }
 
     console.log(
-      `[FillerManager] Loaded ${loadedCount} fillers into memory (${this.fillerKeys.join(", ")}) | Enabled: ${this.enabled} | Threshold: ${this.thresholdMs}ms | Cooldown: ${this.cooldownMs}ms`
+      `[FillerManager] Loaded ${loadedCount} fillers into memory (${this.fillerKeys.join(", ")}) | Enabled: ${this.enabled} | Threshold: ${this.thresholdMs}ms | Cooldown: ${this.cooldownMs}ms`,
     );
   }
 
@@ -66,9 +72,15 @@ class FillerManager {
     }
 
     // If first item in newly shuffled deck matches last played filler, swap with middle
-    if (shuffled.length > 1 && shuffled[shuffled.length - 1] === this.lastFiller) {
+    if (
+      shuffled.length > 1 &&
+      shuffled[shuffled.length - 1] === this.lastFiller
+    ) {
       const swapIdx = Math.floor(shuffled.length / 2);
-      [shuffled[shuffled.length - 1], shuffled[swapIdx]] = [shuffled[swapIdx], shuffled[shuffled.length - 1]];
+      [shuffled[shuffled.length - 1], shuffled[swapIdx]] = [
+        shuffled[swapIdx],
+        shuffled[shuffled.length - 1],
+      ];
     }
 
     this.deck = shuffled;
@@ -125,18 +137,24 @@ class FillerManager {
 
     // Check Cooldown
     if (timeSinceLast < this.cooldownMs) {
-      console.log(`[FillerManager] Session ${sessionId}: Cooldown active (${timeSinceLast}ms < ${this.cooldownMs}ms) — skipping filler`);
+      console.log(
+        `[FillerManager] Session ${sessionId}: Cooldown active (${timeSinceLast}ms < ${this.cooldownMs}ms) — skipping filler`,
+      );
       return;
     }
 
     // Check Turn Gating: Client must have spoken since last filler (prevents filler spam on pauses mid-sentence)
     if (!state.clientHasSpoken) {
-      console.log(`[FillerManager] Session ${sessionId}: Client hasn't spoken yet since last turn — skipping filler`);
+      console.log(
+        `[FillerManager] Session ${sessionId}: Client hasn't spoken yet since last turn — skipping filler`,
+      );
       return;
     }
 
     state.isArmed = true;
-    console.log(`[FillerManager] Session ${sessionId}: Latency timer armed (${this.thresholdMs}ms)...`);
+    console.log(
+      `[FillerManager] Session ${sessionId}: Latency timer armed (${this.thresholdMs}ms)...`,
+    );
 
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {
@@ -145,7 +163,9 @@ class FillerManager {
 
       // Ensure streamer is available and ready
       if (!streamer || !streamer.ws || streamer.ws.readyState !== 1) {
-        console.warn(`[FillerManager] Session ${sessionId}: Streamer WS not ready — cannot play filler`);
+        console.warn(
+          `[FillerManager] Session ${sessionId}: Streamer WS not ready — cannot play filler`,
+        );
         return;
       }
 
@@ -153,7 +173,7 @@ class FillerManager {
       if (!filler) return;
 
       console.log(
-        `\n[FillerManager] >>> LATENCY CROSSED ${this.thresholdMs}ms! INJECTING GURUJI FILLER: "${filler.id}" (${filler.buffer.length} bytes) <<<\n`
+        `\n[FillerManager] >>> LATENCY CROSSED ${this.thresholdMs}ms! INJECTING GURUJI FILLER: "${filler.id}" (${filler.buffer.length} bytes) <<<\n`,
       );
 
       // Inject into AudioStreamer queue. AudioStreamer handles 40ms pacing to Plivo.
@@ -180,7 +200,7 @@ class FillerManager {
       state.timer = null;
       state.isArmed = false;
       console.log(
-        `[FillerManager] Session ${sessionId}: Modulated voice arrived before ${this.thresholdMs}ms threshold — filler cancelled.`
+        `[FillerManager] Session ${sessionId}: Modulated voice arrived before ${this.thresholdMs}ms threshold — filler cancelled.`,
       );
     }
   }
@@ -201,7 +221,9 @@ class FillerManager {
       clearTimeout(state.timer);
       state.timer = null;
       state.isArmed = false;
-      console.log(`[FillerManager] Session ${sessionId}: Client speaking — disarmed pending filler`);
+      console.log(
+        `[FillerManager] Session ${sessionId}: Client speaking — disarmed pending filler`,
+      );
     }
   }
 
@@ -223,4 +245,3 @@ class FillerManager {
 const fillerManager = new FillerManager();
 
 module.exports = { fillerManager, FillerManager };
-

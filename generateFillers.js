@@ -13,7 +13,9 @@ const ELEVEN_VOICE = process.env.ELEVEN_LABS_VOICE_ID;
 const MODEL_ID = process.env.ELEVEN_LABS_TTS_MODEL || "eleven_multilingual_v2";
 
 if (!ELEVEN_KEY || !ELEVEN_VOICE) {
-  console.error("[generateFillers] Missing ELEVEN_LABS_API or ELEVEN_LABS_VOICE_ID in .env");
+  console.error(
+    "[generateFillers] Missing ELEVEN_LABS_API or ELEVEN_LABS_VOICE_ID in .env",
+  );
   process.exit(1);
 }
 
@@ -40,7 +42,9 @@ const COMFORT_TAIL = Buffer.alloc(COMFORT_TAIL_BYTES, 255);
 async function generatePhrase(item) {
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE}?output_format=ulaw_8000`;
 
-  console.log(`[generateFillers] Synthesizing "${item.label}" (${item.text})...`);
+  console.log(
+    `[generateFillers] Synthesizing "${item.label}" (${item.text})...`,
+  );
 
   const resp = await fetch(url, {
     method: "POST",
@@ -82,7 +86,11 @@ async function generatePhrase(item) {
   fs.writeFileSync(rawPath, fullMulaw);
 
   // Also convert to 8kHz WAV for desktop preview
-  const uint8 = new Uint8Array(fullMulaw.buffer, fullMulaw.byteOffset, fullMulaw.byteLength);
+  const uint8 = new Uint8Array(
+    fullMulaw.buffer,
+    fullMulaw.byteOffset,
+    fullMulaw.byteLength,
+  );
   const pcm8k = alawmulaw.mulaw.decode(uint8);
   const wav = new WaveFile();
   wav.fromScratch(1, 8000, "16", pcm8k);
@@ -90,7 +98,9 @@ async function generatePhrase(item) {
   fs.writeFileSync(wavPath, wav.toBuffer());
 
   const durationMs = Math.round((fullMulaw.length / 8000) * 1000);
-  console.log(`  ✓ Saved ${item.id}.raw and ${item.id}.wav (${durationMs}ms, ${fullMulaw.length} bytes)`);
+  console.log(
+    `  ✓ Saved ${item.id}.raw and ${item.id}.wav (${durationMs}ms, ${fullMulaw.length} bytes)`,
+  );
 }
 
 async function run() {
@@ -99,7 +109,9 @@ async function run() {
   console.log(`   Voice ID: ${ELEVEN_VOICE}`);
   console.log(`   Model   : ${MODEL_ID}`);
   console.log(`   Output  : ${FILLERS_DIR}`);
-  console.log("=============================================================\n");
+  console.log(
+    "=============================================================\n",
+  );
 
   for (const item of PHRASES) {
     try {
@@ -113,4 +125,3 @@ async function run() {
 }
 
 run();
-

@@ -37,7 +37,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const express = require("express");
-const http    = require("http");
+const http = require("http");
 const { WebSocketServer } = require("ws");
 
 const { dialClient, hangupCall } = require("./plivoClient");
@@ -46,40 +46,73 @@ const { dialClient, hangupCall } = require("./plivoClient");
 // Both engines loaded simultaneously so calls can switch dynamically at runtime!
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
-const { ElevenLabsS2S }   = require("./elevenLabsS2S");
-const { mulawToPcm16k, pcm24kToMulaw, applyMulawNoiseGate, computeMulawRms } = require("./audioUtils");
-const { fillerManager }   = require("./fillerManager");
+const { ElevenLabsS2S } = require("./elevenLabsS2S");
+const {
+  mulawToPcm16k,
+  pcm24kToMulaw,
+  applyMulawNoiseGate,
+  computeMulawRms,
+} = require("./audioUtils");
+const { fillerManager } = require("./fillerManager");
 
-const PORT           = process.env.PORT || 8080;
-const MY_NUMBER      = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
+const PORT = process.env.PORT || 8080;
+const MY_NUMBER = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
 
 // Sarvam Config
-const SARVAM_KEY     = process.env.SARVAM_API_KEY;
-const SARVAM_SPEAKER = process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
-const SARVAM_LANG    = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
+const SARVAM_KEY = process.env.SARVAM_API_KEY;
+const SARVAM_SPEAKER =
+  process.env.SARVAM_VOICE_ID || process.env.SARVAM_FEMALE_SPEAKER || "priya";
+const SARVAM_LANG = process.env.SARVAM_LANGUAGE_CODE || "hi-IN";
 
 // ElevenLabs Config & Low-Latency Tuning
-const ELEVEN_KEY        = process.env.ELEVEN_LABS_API;
-const ELEVEN_VOICE      = process.env.ELEVEN_LABS_VOICE_ID;
-const ELEVEN_MODEL      = process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS        = parseInt(process.env.ELEVEN_LABS_SILENCE_MS        || "260",  10);
-const SPEECH_THRESH     = parseInt(process.env.ELEVEN_LABS_SPEECH_THRESHOLD  || "100",  10);
-const NOISE_GATE        = parseInt(process.env.ELEVEN_LABS_NOISE_GATE_RANGE  || "0",    10);
-const MAX_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MAX_SPEECH_MS     || "3500", 10);
-const MIN_SPEECH_MS     = parseInt(process.env.ELEVEN_LABS_MIN_SPEECH_MS     || "120",  10);
-const LATENCY_LEVEL     = parseInt(process.env.ELEVEN_LABS_LATENCY_LEVEL      || "3",    10);
-const SIMILARITY_BOOST  = parseFloat(process.env.ELEVEN_LABS_SIMILARITY_BOOST || "0.80");
-const STABILITY         = parseFloat(process.env.ELEVEN_LABS_STABILITY       || "0.70");
-const PREBUFFER_MS      = parseInt(process.env.AUDIO_STREAMER_PREBUFFER_MS   || "160",  10);
+const ELEVEN_KEY = process.env.ELEVEN_LABS_API;
+const ELEVEN_VOICE = process.env.ELEVEN_LABS_VOICE_ID;
+const ELEVEN_MODEL =
+  process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
+const SILENCE_MS = parseInt(process.env.ELEVEN_LABS_SILENCE_MS || "260", 10);
+const SPEECH_THRESH = parseInt(
+  process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "100",
+  10,
+);
+const NOISE_GATE = parseInt(
+  process.env.ELEVEN_LABS_NOISE_GATE_RANGE || "0",
+  10,
+);
+const MAX_SPEECH_MS = parseInt(
+  process.env.ELEVEN_LABS_MAX_SPEECH_MS || "3500",
+  10,
+);
+const MIN_SPEECH_MS = parseInt(
+  process.env.ELEVEN_LABS_MIN_SPEECH_MS || "120",
+  10,
+);
+const LATENCY_LEVEL = parseInt(
+  process.env.ELEVEN_LABS_LATENCY_LEVEL || "3",
+  10,
+);
+const SIMILARITY_BOOST = parseFloat(
+  process.env.ELEVEN_LABS_SIMILARITY_BOOST || "0.80",
+);
+const STABILITY = parseFloat(process.env.ELEVEN_LABS_STABILITY || "0.70");
+const PREBUFFER_MS = parseInt(
+  process.env.AUDIO_STREAMER_PREBUFFER_MS || "160",
+  10,
+);
 
-if (!SARVAM_KEY)   console.warn("[Config] SARVAM_API_KEY not set");
-if (!ELEVEN_KEY)   console.warn("[Config] ELEVEN_LABS_API not set");
+if (!SARVAM_KEY) console.warn("[Config] SARVAM_API_KEY not set");
+if (!ELEVEN_KEY) console.warn("[Config] ELEVEN_LABS_API not set");
 if (!ELEVEN_VOICE) console.warn("[Config] ELEVEN_LABS_VOICE_ID not set");
-if (!MY_NUMBER)    console.warn("[Config] MY_PHONE_NUMBER not set — caller validation disabled");
+if (!MY_NUMBER)
+  console.warn("[Config] MY_PHONE_NUMBER not set — caller validation disabled");
 
 // Global default engine (can be changed on command via POST /api/engine)
-let currentDefaultEngine = (process.env.DEFAULT_ENGINE || "elevenlabs").toLowerCase();
-if (currentDefaultEngine !== "sarvam" && currentDefaultEngine !== "elevenlabs") {
+let currentDefaultEngine = (
+  process.env.DEFAULT_ENGINE || "elevenlabs"
+).toLowerCase();
+if (
+  currentDefaultEngine !== "sarvam" &&
+  currentDefaultEngine !== "elevenlabs"
+) {
   currentDefaultEngine = "elevenlabs";
 }
 console.log(`[Config] Default Modulation Engine: ${currentDefaultEngine}`);
@@ -91,7 +124,7 @@ console.log(`[Config] Default Modulation Engine: ${currentDefaultEngine}`);
  * Set via POST /api/prepare-call from the VoiceModulator web UI.
  * Cleared once the call is initiated or after TTL.
  */
-const pendingCalls   = new Map();
+const pendingCalls = new Map();
 const PENDING_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
 
 /**
@@ -110,18 +143,18 @@ const sessions = new Map();
 //
 class AudioStreamer {
   constructor(ws, sessionId, label, options = {}) {
-    this.ws           = ws;
-    this.sessionId    = sessionId;
-    this.label        = label || "audio";
-    this.queue        = Buffer.alloc(0);
-    this.timer        = null;
-    this.chunkSize    = 320;   // 40ms @ 8kHz μ-law (320 bytes)
-    this.interval     = 40;    // 40ms send cadence
-    const preMs       = options.preBufferMs || PREBUFFER_MS || 160;
+    this.ws = ws;
+    this.sessionId = sessionId;
+    this.label = label || "audio";
+    this.queue = Buffer.alloc(0);
+    this.timer = null;
+    this.chunkSize = 320; // 40ms @ 8kHz μ-law (320 bytes)
+    this.interval = 40; // 40ms send cadence
+    const preMs = options.preBufferMs || PREBUFFER_MS || 160;
     // 160ms @ 8kHz μ-law = 1280 bytes
-    this.preBuffer    = Math.max(320, Math.round((preMs / 1000) * 8000));
+    this.preBuffer = Math.max(320, Math.round((preMs / 1000) * 8000));
     this._isStreaming = false;
-    this._idleCount    = 0;
+    this._idleCount = 0;
   }
 
   addAudio(mulawBuffer) {
@@ -137,14 +170,14 @@ class AudioStreamer {
   _startStreaming() {
     if (this._isStreaming) return;
     this._isStreaming = true;
-    this._idleCount   = 0;
+    this._idleCount = 0;
 
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       if (this.queue.length >= this.chunkSize) {
         // Send exactly one 40ms frame (320 bytes)
         const chunk = this.queue.subarray(0, this.chunkSize);
-        this.queue  = this.queue.subarray(this.chunkSize);
+        this.queue = this.queue.subarray(this.chunkSize);
         this._sendChunk(chunk);
         this._idleCount = 0;
       } else if (this.queue.length > 0) {
@@ -188,9 +221,9 @@ class AudioStreamer {
 
   _stopStreaming() {
     if (this.timer) clearInterval(this.timer);
-    this.timer        = null;
+    this.timer = null;
     this._isStreaming = false;
-    this._idleCount   = 0;
+    this._idleCount = 0;
   }
 
   stop() {
@@ -272,10 +305,10 @@ function getPendingCall(fromNumber) {
 
 // ─── App Setup ───────────────────────────────────────────────────────────────
 
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 
-const myWss     = new WebSocketServer({ noServer: true });
+const myWss = new WebSocketServer({ noServer: true });
 const clientWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
@@ -300,17 +333,17 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get("/", (req, res) => {
   res.json({
-    status:           "ok",
-    version:          "2.0.0",
-    defaultEngine:    currentDefaultEngine,
+    status: "ok",
+    version: "2.0.0",
+    defaultEngine: currentDefaultEngine,
     availableEngines: ["elevenlabs", "sarvam"],
     voices: {
       elevenlabs: ELEVEN_VOICE || "not configured",
-      sarvam:     `${SARVAM_SPEAKER} (${SARVAM_LANG})`,
+      sarvam: `${SARVAM_SPEAKER} (${SARVAM_LANG})`,
     },
-    message:          `Voice modulation server is running with ${currentDefaultEngine} as default`,
-    pendingCalls:     pendingCalls.size,
-    activeCalls:      sessions.size,
+    message: `Voice modulation server is running with ${currentDefaultEngine} as default`,
+    pendingCalls: pendingCalls.size,
+    activeCalls: sessions.size,
   });
 });
 
@@ -320,23 +353,23 @@ app.get("/", (req, res) => {
  */
 app.get("/api/engine", (req, res) => {
   res.json({
-    currentEngine:    currentDefaultEngine,
+    currentEngine: currentDefaultEngine,
     availableEngines: ["elevenlabs", "sarvam"],
     config: {
       elevenlabs: {
-        voiceId:         ELEVEN_VOICE || null,
-        model:           ELEVEN_MODEL,
-        silenceMs:       SILENCE_MS,
+        voiceId: ELEVEN_VOICE || null,
+        model: ELEVEN_MODEL,
+        silenceMs: SILENCE_MS,
         speechThreshold: SPEECH_THRESH,
-        maxSpeechMs:     MAX_SPEECH_MS,
-        minSpeechMs:     MIN_SPEECH_MS,
-        latencyLevel:    LATENCY_LEVEL,
-        preBufferMs:     PREBUFFER_MS,
-        isConfigured:    Boolean(ELEVEN_KEY && ELEVEN_VOICE),
+        maxSpeechMs: MAX_SPEECH_MS,
+        minSpeechMs: MIN_SPEECH_MS,
+        latencyLevel: LATENCY_LEVEL,
+        preBufferMs: PREBUFFER_MS,
+        isConfigured: Boolean(ELEVEN_KEY && ELEVEN_VOICE),
       },
       sarvam: {
-        speaker:      SARVAM_SPEAKER,
-        language:     SARVAM_LANG,
+        speaker: SARVAM_SPEAKER,
+        language: SARVAM_LANG,
         isConfigured: Boolean(SARVAM_KEY),
       },
     },
@@ -349,7 +382,9 @@ app.get("/api/engine", (req, res) => {
  * Accepts { "engine": "elevenlabs" | "sarvam" } or ?engine=...
  */
 app.post("/api/engine", (req, res) => {
-  const reqEngine = (req.body?.engine || req.query?.engine || "").trim().toLowerCase();
+  const reqEngine = (req.body?.engine || req.query?.engine || "")
+    .trim()
+    .toLowerCase();
   if (reqEngine !== "elevenlabs" && reqEngine !== "sarvam") {
     return res.status(400).json({
       error: "Invalid engine. Must be 'elevenlabs' or 'sarvam'.",
@@ -360,13 +395,15 @@ app.post("/api/engine", (req, res) => {
 
   const prev = currentDefaultEngine;
   currentDefaultEngine = reqEngine;
-  console.log(`[Engine] Default modulation engine switched: ${prev} ➔ ${currentDefaultEngine}`);
+  console.log(
+    `[Engine] Default modulation engine switched: ${prev} ➔ ${currentDefaultEngine}`,
+  );
 
   return res.json({
-    success:        true,
-    message:        `Default modulation engine switched to ${currentDefaultEngine}`,
+    success: true,
+    message: `Default modulation engine switched to ${currentDefaultEngine}`,
     previousEngine: prev,
-    currentEngine:  currentDefaultEngine,
+    currentEngine: currentDefaultEngine,
   });
 });
 
@@ -382,7 +419,7 @@ app.post("/api/prepare-call", (req, res) => {
     return res.status(400).json({ error: "clientNumber is required" });
   }
 
-  const effectiveCaller = callerNumber ? callerNumber.trim() : (MY_NUMBER || "");
+  const effectiveCaller = callerNumber ? callerNumber.trim() : MY_NUMBER || "";
   if (!effectiveCaller) {
     return res.status(400).json({ error: "callerNumber is required" });
   }
@@ -395,33 +432,39 @@ app.post("/api/prepare-call", (req, res) => {
   }
 
   // Determine engine: requested engine or fallback to server default
-  const selectedEngine = (engine && (engine.toLowerCase() === "sarvam" || engine.toLowerCase() === "elevenlabs"))
-    ? engine.toLowerCase()
-    : currentDefaultEngine;
+  const selectedEngine =
+    engine &&
+    (engine.toLowerCase() === "sarvam" || engine.toLowerCase() === "elevenlabs")
+      ? engine.toLowerCase()
+      : currentDefaultEngine;
 
   pendingCalls.set(normCaller, {
     clientNumber: clientNumber.trim(),
     callerNumber: effectiveCaller,
-    engine:       selectedEngine,
-    createdAt:    now,
+    engine: selectedEngine,
+    createdAt: now,
   });
-  console.log(`[PrepareCall] Registered caller ${normCaller} (${effectiveCaller}) ➔ client ${clientNumber.trim()} | Engine: ${selectedEngine}`);
+  console.log(
+    `[PrepareCall] Registered caller ${normCaller} (${effectiveCaller}) ➔ client ${clientNumber.trim()} | Engine: ${selectedEngine}`,
+  );
 
   return res.json({
-    success:      true,
-    message:      `Ready. Engine: ${selectedEngine}. Now dial the Plivo number from your phone.`,
+    success: true,
+    message: `Ready. Engine: ${selectedEngine}. Now dial the Plivo number from your phone.`,
     clientNumber: clientNumber.trim(),
     callerNumber: effectiveCaller,
-    engine:       selectedEngine,
-    expiresInMs:  PENDING_TTL_MS,
+    engine: selectedEngine,
+    expiresInMs: PENDING_TTL_MS,
   });
 });
 
 /** GET /api/prepare-call/status */
 app.get("/api/prepare-call/status", (req, res) => {
   const reqCaller = req.query.callerNumber;
-  const callerKey = reqCaller ? normaliseNumber(reqCaller) : normaliseNumber(MY_NUMBER || "");
-  
+  const callerKey = reqCaller
+    ? normaliseNumber(reqCaller)
+    : normaliseNumber(MY_NUMBER || "");
+
   let entry = callerKey ? pendingCalls.get(callerKey) : null;
   if (!entry && pendingCalls.size > 0) {
     entry = pendingCalls.values().next().value;
@@ -429,16 +472,20 @@ app.get("/api/prepare-call/status", (req, res) => {
   const active = sessions.size;
 
   if (!entry || Date.now() - entry.createdAt > PENDING_TTL_MS) {
-    return res.json({ pending: false, activeCalls: active, currentEngine: currentDefaultEngine });
+    return res.json({
+      pending: false,
+      activeCalls: active,
+      currentEngine: currentDefaultEngine,
+    });
   }
 
   return res.json({
-    pending:      true,
+    pending: true,
     clientNumber: entry.clientNumber,
     callerNumber: entry.callerNumber,
-    engine:       entry.engine || currentDefaultEngine,
-    activeCalls:  active,
-    expiresInMs:  PENDING_TTL_MS - (Date.now() - entry.createdAt),
+    engine: entry.engine || currentDefaultEngine,
+    activeCalls: active,
+    expiresInMs: PENDING_TTL_MS - (Date.now() - entry.createdAt),
   });
 });
 
@@ -451,8 +498,13 @@ const terminateActiveCalls = () => {
     if (session.myCallUuid) hangupCall(session.myCallUuid);
     if (session.clientCallUuid) hangupCall(session.clientCallUuid);
 
-    try { if (session.myWs && session.myWs.readyState === 1) session.myWs.close(); } catch {}
-    try { if (session.clientWs && session.clientWs.readyState === 1) session.clientWs.close(); } catch {}
+    try {
+      if (session.myWs && session.myWs.readyState === 1) session.myWs.close();
+    } catch {}
+    try {
+      if (session.clientWs && session.clientWs.readyState === 1)
+        session.clientWs.close();
+    } catch {}
 
     cleanupSession(sessionId);
   }
@@ -460,9 +512,15 @@ const terminateActiveCalls = () => {
 };
 
 app.post("/api/end-call", (req, res) => {
-  console.log("[EndCall] Terminating all active call legs and pending registrations...");
+  console.log(
+    "[EndCall] Terminating all active call legs and pending registrations...",
+  );
   const endedCount = terminateActiveCalls();
-  return res.json({ success: true, message: `Ended ${endedCount} active calls`, endedCount });
+  return res.json({
+    success: true,
+    message: `Ended ${endedCount} active calls`,
+    endedCount,
+  });
 });
 
 app.post("/api/prepare-call/cancel", (req, res) => {
@@ -480,22 +538,38 @@ app.all("/api/plivo/answer", (req, res) => {
   const serverUrl = process.env.SERVER_URL || `http://localhost:${PORT}`;
   let wsUrl = serverUrl.replace(/^https?/, "wss") + "/stream";
 
-  const fromNumber = req.body?.From || req.body?.from || req.query?.From || req.query?.from || "";
-  const callUUID   = req.body?.CallUUID || req.body?.callUUID || req.query?.CallUUID || req.query?.callUUID || "";
-  const toNumber   = req.body?.To || req.body?.to || req.query?.To || req.query?.to || "";
+  const fromNumber =
+    req.body?.From ||
+    req.body?.from ||
+    req.query?.From ||
+    req.query?.from ||
+    "";
+  const callUUID =
+    req.body?.CallUUID ||
+    req.body?.callUUID ||
+    req.query?.CallUUID ||
+    req.query?.callUUID ||
+    "";
+  const toNumber =
+    req.body?.To || req.body?.to || req.query?.To || req.query?.to || "";
 
   try {
     const urlObj = new URL(wsUrl);
     if (fromNumber) urlObj.searchParams.set("from", fromNumber);
-    if (callUUID)   urlObj.searchParams.set("callUUID", callUUID);
-    if (toNumber)   urlObj.searchParams.set("to", toNumber);
+    if (callUUID) urlObj.searchParams.set("callUUID", callUUID);
+    if (toNumber) urlObj.searchParams.set("to", toNumber);
     wsUrl = urlObj.toString();
   } catch (_) {
-    if (fromNumber) wsUrl += (wsUrl.includes("?") ? "&" : "?") + `from=${encodeURIComponent(fromNumber)}`;
+    if (fromNumber)
+      wsUrl +=
+        (wsUrl.includes("?") ? "&" : "?") +
+        `from=${encodeURIComponent(fromNumber)}`;
   }
 
   const escapedWsUrl = wsUrl.replace(/&/g, "&amp;");
-  const extraHeadersAttr = fromNumber ? ` extraHeaders="from:${fromNumber}"` : "";
+  const extraHeadersAttr = fromNumber
+    ? ` extraHeaders="from:${fromNumber}"`
+    : "";
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -551,19 +625,29 @@ myWss.on("connection", (myWs, req) => {
     } catch (_) {}
   }
 
-  let callUUID  = queryCallUUID || null;
+  let callUUID = queryCallUUID || null;
   let sessionId = null;
 
   myWs.on("message", async (raw) => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
     switch (msg.event) {
       case "start": {
-        callUUID  = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid || queryCallUUID || "unknown";
+        callUUID =
+          msg.start?.callId ||
+          msg.start?.callUUID ||
+          msg.start?.call_uuid ||
+          queryCallUUID ||
+          "unknown";
         sessionId = callUUID;
 
-        let fromNumber = queryFrom || msg.start?.from || msg.start?.callerName || "";
+        let fromNumber =
+          queryFrom || msg.start?.from || msg.start?.callerName || "";
 
         // Check extra_headers from Plivo start event if available
         if (!fromNumber && msg.start?.extra_headers) {
@@ -577,13 +661,17 @@ myWss.on("connection", (myWs, req) => {
           } catch (_) {}
         }
 
-        console.log(`[MyWS] Call started | UUID: ${callUUID} | from: ${fromNumber || "(not provided in stream)"}`);
+        console.log(
+          `[MyWS] Call started | UUID: ${callUUID} | from: ${fromNumber || "(not provided in stream)"}`,
+        );
         console.log(`[MyWS] Metadata:`, JSON.stringify(msg.start, null, 2));
 
         const pending = getPendingCall(fromNumber);
 
         if (!pending) {
-          console.warn("[MyWS] No pending client number registered — hanging up");
+          console.warn(
+            "[MyWS] No pending client number registered — hanging up",
+          );
           myWs.close();
           return;
         }
@@ -597,32 +685,43 @@ myWss.on("connection", (myWs, req) => {
         if (fromNumber) {
           console.log(`[MyWS] Trusted caller verified: ${fromNumber}`);
         } else {
-          console.log(`[MyWS] Using pending registration for caller ${pending.callerNumber || MY_NUMBER}`);
+          console.log(
+            `[MyWS] Using pending registration for caller ${pending.callerNumber || MY_NUMBER}`,
+          );
         }
 
         const clientNumber = pending.clientNumber;
-        const callEngine   = (pending.engine || currentDefaultEngine || "elevenlabs").toLowerCase();
+        const callEngine = (
+          pending.engine ||
+          currentDefaultEngine ||
+          "elevenlabs"
+        ).toLowerCase();
 
         sessions.set(sessionId, {
           myWs,
-          clientWs:       null,
-          engine:         callEngine,
-          sttWs:          null,
-          ttsWs:          null,
-          s2s:            null,
-          streamer:       new AudioStreamer(null, sessionId, "client", { preBufferMs: PREBUFFER_MS }),
+          clientWs: null,
+          engine: callEngine,
+          sttWs: null,
+          ttsWs: null,
+          s2s: null,
+          streamer: new AudioStreamer(null, sessionId, "client", {
+            preBufferMs: PREBUFFER_MS,
+          }),
           clientNumber,
-          myCallUuid:     callUUID,
+          myCallUuid: callUUID,
           clientCallUuid: null,
         });
 
-        console.log(`[MyWS] Session ${sessionId} initialized | Engine: ${callEngine} | Will dial client: ${clientNumber}`);
+        console.log(
+          `[MyWS] Session ${sessionId} initialized | Engine: ${callEngine} | Will dial client: ${clientNumber}`,
+        );
 
         try {
           const resp = await dialClient(sessionId, clientNumber);
           const currentSession = sessions.get(sessionId);
           if (currentSession && resp) {
-            currentSession.clientCallUuid = resp.requestUuid || resp.callUuid || null;
+            currentSession.clientCallUuid =
+              resp.requestUuid || resp.callUuid || null;
           }
         } catch (err) {
           console.error("[Plivo] Failed to dial client:", err.message);
@@ -649,10 +748,12 @@ myWss.on("connection", (myWs, req) => {
                 if (rms > SPEECH_THRESH && session.streamer) {
                   fillerManager.onAgentSpeechStart(sessionId, session.streamer);
                 }
-                const pcmBuf   = mulawToPcm16k(mulawBuf);
+                const pcmBuf = mulawToPcm16k(mulawBuf);
                 session.sttWs.sendAudio(pcmBuf);
                 if (Math.random() < 0.05) {
-                  console.log(`[MyWS→STT] Audio frame forwarded to Sarvam STT (session: ${sessionId})`);
+                  console.log(
+                    `[MyWS→STT] Audio frame forwarded to Sarvam STT (session: ${sessionId})`,
+                  );
                 }
               } catch (err) {
                 console.error("[MyWS→STT] Conversion/Send error:", err.message);
@@ -669,7 +770,9 @@ myWss.on("connection", (myWs, req) => {
                 }
                 session.s2s.addAudio(mulawBuf);
                 if (Math.random() < 0.02) {
-                  console.log(`[MyWS→S2S] Audio frame → ElevenLabs WS (session: ${sessionId})`);
+                  console.log(
+                    `[MyWS→S2S] Audio frame → ElevenLabs WS (session: ${sessionId})`,
+                  );
                 }
               } catch (err) {
                 console.error("[MyWS→S2S] Error:", err.message);
@@ -703,23 +806,29 @@ myWss.on("connection", (myWs, req) => {
 clientWss.on("connection", (clientWs, req) => {
   console.log("[ClientWS] ─── Client leg connected ──────────────────");
 
-  const url       = new URL(req.url, "http://localhost");
+  const url = new URL(req.url, "http://localhost");
   const sessionId = url.searchParams.get("sessionId");
-  const session   = sessions.get(sessionId);
+  const session = sessions.get(sessionId);
 
   if (!session) {
-    console.warn(`[ClientWS] No active session found for ${sessionId} — closing`);
+    console.warn(
+      `[ClientWS] No active session found for ${sessionId} — closing`,
+    );
     clientWs.close();
     return;
   }
 
-  session.clientWs    = clientWs;
+  session.clientWs = clientWs;
   session.streamer.ws = clientWs;
-  console.log(`[ClientWS] Linked to session ${sessionId} | client: ${session.clientNumber} | engine: ${session.engine}`);
+  console.log(
+    `[ClientWS] Linked to session ${sessionId} | client: ${session.clientNumber} | engine: ${session.engine}`,
+  );
 
   if (session.engine === "sarvam") {
     // === INITIALIZE SARVAM (STT + TTS) ========================================
-    console.log(`[ClientWS] Initializing Sarvam STT + TTS for session ${sessionId}...`);
+    console.log(
+      `[ClientWS] Initializing Sarvam STT + TTS for session ${sessionId}...`,
+    );
 
     // 1. Initialise Sarvam TTS — outputs modulated speech to client
     const ttsWs = createSarvamTTS(
@@ -742,12 +851,14 @@ clientWss.on("connection", (clientWs, req) => {
           cur.streamer.addAudio(mulawBuf);
 
           if (Math.random() < 0.05) {
-            console.log(`[TTS→Client] Buffered Sarvam modulated audio (session: ${sessionId})`);
+            console.log(
+              `[TTS→Client] Buffered Sarvam modulated audio (session: ${sessionId})`,
+            );
           }
         } catch (err) {
           console.error("[TTS→Client] Audio downsampling error:", err.message);
         }
-      }
+      },
     );
     session.ttsWs = ttsWs;
 
@@ -762,15 +873,20 @@ clientWss.on("connection", (clientWs, req) => {
           if (cur?.ttsWs) {
             cur.ttsWs.synthesize(transcript);
           } else {
-            console.warn("[STT→TTS] TTS not ready, dropping transcript:", transcript);
+            console.warn(
+              "[STT→TTS] TTS not ready, dropping transcript:",
+              transcript,
+            );
           }
         }
-      }
+      },
     );
     session.sttWs = sttWs;
   } else {
     // === INITIALIZE ELEVENLABS (S2S) ==========================================
-    console.log(`[ClientWS] Initializing ElevenLabs S2S for session ${sessionId}...`);
+    console.log(
+      `[ClientWS] Initializing ElevenLabs S2S for session ${sessionId}...`,
+    );
 
     const s2s = new ElevenLabsS2S(
       ELEVEN_KEY,
@@ -787,19 +903,21 @@ clientWss.on("connection", (clientWs, req) => {
         cur.streamer.addAudio(ulawChunk);
 
         if (Math.random() < 0.02) {
-          console.log(`[S2S→Client] Received modulated chunk → AudioStreamer (session: ${sessionId})`);
+          console.log(
+            `[S2S→Client] Received modulated chunk → AudioStreamer (session: ${sessionId})`,
+          );
         }
       },
       {
-        silenceDurationMs:     SILENCE_MS,
-        speechThreshold:       SPEECH_THRESH,
-        maxSpeechMs:           MAX_SPEECH_MS,
-        minSpeechMs:           MIN_SPEECH_MS,
-        latencyLevel:          LATENCY_LEVEL,
-        similarityBoost:       SIMILARITY_BOOST,
-        stability:             STABILITY,
+        silenceDurationMs: SILENCE_MS,
+        speechThreshold: SPEECH_THRESH,
+        maxSpeechMs: MAX_SPEECH_MS,
+        minSpeechMs: MIN_SPEECH_MS,
+        latencyLevel: LATENCY_LEVEL,
+        similarityBoost: SIMILARITY_BOOST,
+        stability: STABILITY,
         removeBackgroundNoise: process.env.ELEVEN_LABS_REMOVE_NOISE === "true",
-        modelId:               ELEVEN_MODEL,
+        modelId: ELEVEN_MODEL,
         onSpeechStart: () => {
           const cur = sessions.get(sessionId);
           if (cur?.streamer) {
@@ -813,10 +931,15 @@ clientWss.on("connection", (clientWs, req) => {
 
   clientWs.on("message", (raw) => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
     if (msg.event === "start") {
-      const clientUuid = msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid;
+      const clientUuid =
+        msg.start?.callId || msg.start?.callUUID || msg.start?.call_uuid;
       if (clientUuid && session) {
         session.clientCallUuid = clientUuid;
       }
@@ -856,7 +979,9 @@ clientWss.on("connection", (clientWs, req) => {
             }),
           );
           if (Math.random() < 0.05)
-            console.log(`[Router] Client audio → MyWS raw passthrough (session: ${sessionId})`);
+            console.log(
+              `[Router] Client audio → MyWS raw passthrough (session: ${sessionId})`,
+            );
         }
       }
     }
@@ -869,7 +994,9 @@ clientWss.on("connection", (clientWs, req) => {
     if (cur) cur.clientWs = null;
   });
 
-  clientWs.on("error", (err) => console.error("[ClientWS] Error:", err.message));
+  clientWs.on("error", (err) =>
+    console.error("[ClientWS] Error:", err.message),
+  );
 });
 
 // ─── Cleanup Helpers ──────────────────────────────────────────────────────────
@@ -879,15 +1006,23 @@ function cleanupSession(sessionId) {
   if (!sessionId) return;
   const session = sessions.get(sessionId);
   if (session) {
-    try { session.s2s?.destroy(); } catch {}
-    try { session.sttWs?.close(); } catch {}
-    try { session.ttsWs?.close(); } catch {}
-    try { session.streamer?.stop(); } catch {}
-    session.s2s      = null;
-    session.sttWs    = null;
-    session.ttsWs    = null;
+    try {
+      session.s2s?.destroy();
+    } catch {}
+    try {
+      session.sttWs?.close();
+    } catch {}
+    try {
+      session.ttsWs?.close();
+    } catch {}
+    try {
+      session.streamer?.stop();
+    } catch {}
+    session.s2s = null;
+    session.sttWs = null;
+    session.ttsWs = null;
     session.clientWs = null;
-    session.myWs     = null;
+    session.myWs = null;
   }
   sessions.delete(sessionId);
   console.log(`[Cleanup] Session ${sessionId} removed`);
@@ -898,16 +1033,36 @@ function cleanupSession(sessionId) {
 server.listen(PORT, () => {
   fillerManager.init();
   console.log("");
-  console.log("╔══════════════════════════════════════════════════════════════╗");
-  console.log("║     Voice Modulation Server (Dynamic Dual Engine)            ║");
-  console.log(`║   HTTP : http://localhost:${PORT}                              ║`);
-  console.log(`║   WS   : ws://localhost:${PORT}/stream                         ║`);
-  console.log(`║   WS   : ws://localhost:${PORT}/client-stream                  ║`);
+  console.log(
+    "╔══════════════════════════════════════════════════════════════╗",
+  );
+  console.log(
+    "║     Voice Modulation Server (Dynamic Dual Engine)            ║",
+  );
+  console.log(
+    `║   HTTP : http://localhost:${PORT}                              ║`,
+  );
+  console.log(
+    `║   WS   : ws://localhost:${PORT}/stream                         ║`,
+  );
+  console.log(
+    `║   WS   : ws://localhost:${PORT}/client-stream                  ║`,
+  );
   console.log(`║   Default Engine   : ${currentDefaultEngine.padEnd(39)} ║`);
-  console.log(`║   ElevenLabs Voice : ${(ELEVEN_VOICE?.slice(0, 24) || "not set").padEnd(39)} ║`);
-  console.log(`║   Sarvam Speaker   : ${(SARVAM_SPEAKER?.slice(0, 24) || "not set").padEnd(39)} ║`);
-  console.log(`║   My #             : ${(MY_NUMBER || "NOT SET").padEnd(39)} ║`);
-  console.log(`║   Guruji Fillers   : ${(fillerManager.enabled ? `Active (thresh=${fillerManager.thresholdMs}ms, count=${fillerManager.fillerKeys.length})` : "Disabled").padEnd(39)} ║`);
-  console.log("╚══════════════════════════════════════════════════════════════╝");
+  console.log(
+    `║   ElevenLabs Voice : ${(ELEVEN_VOICE?.slice(0, 24) || "not set").padEnd(39)} ║`,
+  );
+  console.log(
+    `║   Sarvam Speaker   : ${(SARVAM_SPEAKER?.slice(0, 24) || "not set").padEnd(39)} ║`,
+  );
+  console.log(
+    `║   My #             : ${(MY_NUMBER || "NOT SET").padEnd(39)} ║`,
+  );
+  console.log(
+    `║   Guruji Fillers   : ${(fillerManager.enabled ? `Active (thresh=${fillerManager.thresholdMs}ms, count=${fillerManager.fillerKeys.length})` : "Disabled").padEnd(39)} ║`,
+  );
+  console.log(
+    "╚══════════════════════════════════════════════════════════════╝",
+  );
   console.log("");
 });

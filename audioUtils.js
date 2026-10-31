@@ -1,5 +1,5 @@
-const alawmulaw = require('alawmulaw');
-const { WaveFile } = require('wavefile');
+const alawmulaw = require("alawmulaw");
+const { WaveFile } = require("wavefile");
 
 // Noise gate: μ-law silence byte (127 = 0 PCM after decode)
 const MULAW_SILENCE_BYTE = 127;
@@ -12,14 +12,18 @@ const MULAW_SILENCE_BYTE = 127;
  * @returns {Buffer}           - PCM16 at 16kHz
  */
 function mulawToPcm16k(mulawBuffer) {
-  const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
+  const uint8 = new Uint8Array(
+    mulawBuffer.buffer,
+    mulawBuffer.byteOffset,
+    mulawBuffer.byteLength,
+  );
   const pcm8k = alawmulaw.mulaw.decode(uint8); // Int16Array, 8kHz
 
   // Upsample 8kHz → 16kHz via wavefile resampler
   const wav = new WaveFile();
-  wav.fromScratch(1, 8000, '16', pcm8k);
+  wav.fromScratch(1, 8000, "16", pcm8k);
   wav.toSampleRate(16000);
-  
+
   const pcm16k = wav.getSamples(false, Int16Array);
   return Buffer.from(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength);
 }
@@ -33,7 +37,11 @@ function mulawToPcm16k(mulawBuffer) {
  * @returns {Int16Array}       - PCM16 at 16kHz
  */
 function mulawToPcm16kRaw(mulawBuffer) {
-  const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
+  const uint8 = new Uint8Array(
+    mulawBuffer.buffer,
+    mulawBuffer.byteOffset,
+    mulawBuffer.byteLength,
+  );
   const pcm8k = alawmulaw.mulaw.decode(uint8); // Int16Array, 8kHz
 
   // Simple 2x linear upsample (8k → 16k): insert interpolated sample between each pair
@@ -63,7 +71,10 @@ function applyMulawNoiseGate(mulawBuffer, gateRange = 3) {
   for (let i = 0; i < out.length; i++) {
     const b = out[i];
     // Check if within gateRange of negative zero (127) or positive zero (255)
-    if ((b <= 127 && b >= 127 - gateRange) || (b <= 255 && b >= 255 - gateRange)) {
+    if (
+      (b <= 127 && b >= 127 - gateRange) ||
+      (b <= 255 && b >= 255 - gateRange)
+    ) {
       out[i] = 255; // 255 = standard μ-law silence
     }
   }
@@ -74,7 +85,7 @@ function applyMulawNoiseGate(mulawBuffer, gateRange = 3) {
  * Checks if a buffer starts with a WAV RIFF header.
  */
 function hasWavHeader(buffer) {
-  return buffer.length >= 44 && buffer.toString('utf8', 0, 4) === 'RIFF';
+  return buffer.length >= 44 && buffer.toString("utf8", 0, 4) === "RIFF";
 }
 
 /**
@@ -103,18 +114,27 @@ function pcm24kToMulaw(pcmBuffer) {
   if (rawPcm.byteOffset % 2 !== 0) {
     alignedPcm = Buffer.from(rawPcm);
   }
-  
+
   // Create a WAV in memory so wavefile can resample it
   const wav = new WaveFile();
   // 1 channel, 24000 Hz, 16-bit, samples
-  wav.fromScratch(1, 24000, '16', new Int16Array(alignedPcm.buffer, alignedPcm.byteOffset, alignedPcm.byteLength / 2));
-  
+  wav.fromScratch(
+    1,
+    24000,
+    "16",
+    new Int16Array(
+      alignedPcm.buffer,
+      alignedPcm.byteOffset,
+      alignedPcm.byteLength / 2,
+    ),
+  );
+
   // Resample properly to 8kHz (this avoids the aliasing distortion!)
   wav.toSampleRate(8000);
-  
+
   // Extract the new 8kHz samples
   const pcm8k = wav.getSamples(false, Int16Array);
-  
+
   // Encode to μ-law
   const encoded = alawmulaw.mulaw.encode(pcm8k);
   return Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength);
@@ -132,7 +152,11 @@ function pcm8kToMulaw(pcmBuffer) {
   if (rawPcm.byteOffset % 2 !== 0) {
     alignedPcm = Buffer.from(rawPcm);
   }
-  const pcm8k = new Int16Array(alignedPcm.buffer, alignedPcm.byteOffset, alignedPcm.byteLength / 2);
+  const pcm8k = new Int16Array(
+    alignedPcm.buffer,
+    alignedPcm.byteOffset,
+    alignedPcm.byteLength / 2,
+  );
   const encoded = alawmulaw.mulaw.encode(pcm8k);
   return Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength);
 }
@@ -145,12 +169,16 @@ function pcm8kToMulaw(pcmBuffer) {
  * @returns {Buffer}           - WAV file (PCM16 @ 16kHz, mono)
  */
 function mulawToWav16k(mulawBuffer) {
-  const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
+  const uint8 = new Uint8Array(
+    mulawBuffer.buffer,
+    mulawBuffer.byteOffset,
+    mulawBuffer.byteLength,
+  );
   const pcm8k = alawmulaw.mulaw.decode(uint8); // Int16Array @ 8kHz
-  
+
   // Upsample 8kHz → 16kHz via wavefile resampler
   const wav = new WaveFile();
-  wav.fromScratch(1, 8000, '16', pcm8k);
+  wav.fromScratch(1, 8000, "16", pcm8k);
   wav.toSampleRate(16000);
 
   return Buffer.from(wav.toBuffer());
@@ -165,7 +193,11 @@ function mulawToWav16k(mulawBuffer) {
 function computeMulawRms(mulawBuffer) {
   if (!mulawBuffer || mulawBuffer.length === 0) return 0;
   try {
-    const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
+    const uint8 = new Uint8Array(
+      mulawBuffer.buffer,
+      mulawBuffer.byteOffset,
+      mulawBuffer.byteLength,
+    );
     const pcm = alawmulaw.mulaw.decode(uint8); // Int16Array
     let sumSq = 0;
     for (let i = 0; i < pcm.length; i++) sumSq += pcm[i] * pcm[i];
@@ -175,4 +207,14 @@ function computeMulawRms(mulawBuffer) {
   }
 }
 
-module.exports = { mulawToPcm16k, mulawToPcm16kRaw, pcm24kToMulaw, pcm8kToMulaw, mulawToWav16k, hasWavHeader, stripWavHeader, applyMulawNoiseGate, computeMulawRms };
+module.exports = {
+  mulawToPcm16k,
+  mulawToPcm16kRaw,
+  pcm24kToMulaw,
+  pcm8kToMulaw,
+  mulawToWav16k,
+  hasWavHeader,
+  stripWavHeader,
+  applyMulawNoiseGate,
+  computeMulawRms,
+};

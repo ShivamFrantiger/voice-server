@@ -9,7 +9,9 @@ async function runTest() {
   fillerManager.init();
 
   if (fillerManager.fillerKeys.length !== 7) {
-    throw new Error(`Expected 7 fillers, found ${fillerManager.fillerKeys.length}`);
+    throw new Error(
+      `Expected 7 fillers, found ${fillerManager.fillerKeys.length}`,
+    );
   }
   console.log("✓ All 7 filler files successfully loaded into RAM.\n");
 
@@ -32,15 +34,21 @@ async function runTest() {
   const mockStreamer1 = {
     ws: { readyState: 1 },
     chunks: [],
-    addAudio(buf) { this.chunks.push(buf); }
+    addAudio(buf) {
+      this.chunks.push(buf);
+    },
   };
   fillerManager.onAgentSpeechStart("session-1", mockStreamer1);
-  console.log("Agent started speaking. Simulating fast response arriving at 300ms...");
-  await new Promise(r => setTimeout(r, 300));
+  console.log(
+    "Agent started speaking. Simulating fast response arriving at 300ms...",
+  );
+  await new Promise((r) => setTimeout(r, 300));
   fillerManager.onModulatedChunkReceived("session-1");
-  await new Promise(r => setTimeout(r, 900)); // wait past 1000ms
+  await new Promise((r) => setTimeout(r, 900)); // wait past 1000ms
   if (mockStreamer1.chunks.length > 0) {
-    throw new Error("Filler was played despite modulated voice arriving early!");
+    throw new Error(
+      "Filler was played despite modulated voice arriving early!",
+    );
   }
   console.log("✓ Fast response aborted the filler cleanly.\n");
 
@@ -48,22 +56,32 @@ async function runTest() {
   const mockStreamer2 = {
     ws: { readyState: 1 },
     chunks: [],
-    addAudio(buf) { this.chunks.push(buf); }
+    addAudio(buf) {
+      this.chunks.push(buf);
+    },
   };
   fillerManager.onAgentSpeechStart("session-2", mockStreamer2);
-  console.log("Agent started speaking. Waiting 1100ms for latency threshold to fire...");
-  await new Promise(r => setTimeout(r, 1150));
+  console.log(
+    "Agent started speaking. Waiting 1100ms for latency threshold to fire...",
+  );
+  await new Promise((r) => setTimeout(r, 1150));
   if (mockStreamer2.chunks.length === 0) {
-    throw new Error("Expected filler to be injected, but streamer queue is empty!");
+    throw new Error(
+      "Expected filler to be injected, but streamer queue is empty!",
+    );
   }
-  console.log(`✓ Filler successfully injected into AudioStreamer queue (${mockStreamer2.chunks[0].length} bytes).\n`);
+  console.log(
+    `✓ Filler successfully injected into AudioStreamer queue (${mockStreamer2.chunks[0].length} bytes).\n`,
+  );
 
   console.log("=== Testing Turn Gating & Cooldown ===");
   // Trying to trigger immediately again without client speaking
   fillerManager.onAgentSpeechStart("session-2", mockStreamer2);
-  await new Promise(r => setTimeout(r, 1150));
+  await new Promise((r) => setTimeout(r, 1150));
   if (mockStreamer2.chunks.length !== 1) {
-    throw new Error("Filler triggered again without client speaking or cooldown!");
+    throw new Error(
+      "Filler triggered again without client speaking or cooldown!",
+    );
   }
   console.log("✓ Filler prevented from re-triggering mid-turn.\n");
 
@@ -73,7 +91,7 @@ async function runTest() {
   const state = fillerManager.sessions.get("session-2");
   state.lastPlayedAt = Date.now() - 9000; // 9 seconds ago
   fillerManager.onAgentSpeechStart("session-2", mockStreamer2);
-  await new Promise(r => setTimeout(r, 1150));
+  await new Promise((r) => setTimeout(r, 1150));
   if (mockStreamer2.chunks.length !== 2) {
     throw new Error("Expected 2nd filler after client speech turn reset!");
   }
@@ -87,8 +105,7 @@ async function runTest() {
   console.log("=========================================");
 }
 
-runTest().catch(err => {
+runTest().catch((err) => {
   console.error("Test failed:", err);
   process.exit(1);
 });
-
