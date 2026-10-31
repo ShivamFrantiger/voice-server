@@ -1,14 +1,13 @@
 // audioStreamer.js — Adaptive Drift-Compensated Real-Time Audio Engine
 //
-// Step 1 Optimization:
-//   • High-Precision Self-Correcting Timer: eliminates the 23.2% Node.js setInterval
-//     drift using performance.now() compensation (drift drops from ~930ms to <5ms).
-//   • Dynamic Catch-Up Drain: if queue backlog exceeds 200ms (>1600 bytes),
-//     dynamically drains larger frames (80ms/640B) so bursts don't accumulate lag.
-//   • Queue Hard Ceiling: bounds buffer to max 800ms (6400 bytes); drops stale
-//     audio automatically if upstream delays ever occur.
-//   • Plivo clearAudio Support: instantly flushes Plivo's hardware buffer on
-//     barge-in or call reset.
+// Key Features:
+//   • High-Precision Self-Correcting Timer: eliminates Node.js setInterval drift
+//     using performance.now() compensation (cadence locked to 40ms / 8000 B/s).
+//   • Zero-Truncation Delivery: preserves 100% of the speech audio from the very
+//     first syllable without dropping or slicing the beginning of sentences.
+//   • High-Capacity Buffer: supports natural long sentences (up to 40 seconds)
+//     without clipping or dropping bytes.
+//   • Plivo clearAudio Support: flushes Plivo's hardware buffer on barge-in / reset.
 
 class AudioStreamer {
   constructor(ws, sessionId, label, options = {}) {
@@ -17,35 +16,36 @@ class AudioStreamer {
     this.label = label || "audio";
     this.queue = Buffer.alloc(0);
     this.timer = null;
-    this.chunkSize = 320; // Standard 40ms @ 8kHz μ-law (320 bytes)
-    this.interval = 40;  // 40ms nominal cadence
+    this.chunkSize = 320; // 40ms @ 8kHz μ-law (320 bytes)
+    this.interval = 40;  // 40ms send cadence = exactly 8000 bytes/sec
     const preMs = options.preBufferMs ?? (parseInt(process.env.AUDIO_STREAMER_PREBUFFER_MS || "40", 10));
     this.preBuffer = Math.max(320, Math.round((preMs / 1000) * 8000));
-    this.maxQueueBytes = options.maxQueueBytes || 6400; // 800ms ceiling — physically prevents runaway buffer bloat
+    // Generous 40-second safety limit to protect against orphaned connections
+    // while NEVER dropping legitimate long sentences or phrase beginnings.
+    this.maxQueueBytes = options.maxQueueBytes || 320000;
 
     this._isStreaming = false;
     this._idleCount = 0;
     this._expectedTime = 0;
     this._totalBytesSent = 0;
     this._framesSent = 0;
-    this._lastLogTime = 0;
   }
 
   addAudio(mulawBuffer) {
     if (!mulawBuffer || mulawBuffer.length === 0) return;
 
+    // Append incoming modulated audio to playback queue
     this.queue = Buffer.concat([this.queue, mulawBuffer]);
 
-    // Hard ceiling safety check: shed excess stale audio if buffer bloat ever starts
+    // Safety guard against extreme runaway memory leaks (only if > 40 seconds)
     if (this.queue.length > this.maxQueueBytes) {
-      const dropBytes = this.queue.length - this.maxQueueBytes;
       console.warn(
-        `[AudioStreamer:${this.label}] Buffer bloat detected (${this.queue.length}B > ${this.maxQueueBytes}B). Dropping ${dropBytes}B stale audio to lock to real-time.`,
+        `[AudioStreamer:${this.label}] Extreme queue overflow (${this.queue.length}B > ${this.maxQueueBytes}B) — capping to prevent memory leak.`,
       );
-      this.queue = this.queue.subarray(dropBytes);
+      this.queue = this.queue.subarray(this.queue.length - this.maxQueueBytes);
     }
 
-    // Start streaming once pre-buffer threshold is reached
+    // Start streaming immediately once we have at least one frame of audio
     if (!this._isStreaming && this.queue.length >= this.preBuffer) {
       this._startStreaming();
     }
@@ -65,30 +65,17 @@ class AudioStreamer {
     if (!this._isStreaming) return;
 
     if (this.queue.length >= this.chunkSize) {
-      // Adaptive Catch-Up: If queue > 200ms (1600B), send up to 80ms (640B) to catch up smoothly
-      let sendBytes = this.chunkSize;
-      if (this.queue.length >= 1600) {
-        sendBytes = Math.min(640, this.queue.length);
-      }
-
-      const chunk = this.queue.subarray(0, sendBytes);
-      this.queue = this.queue.subarray(sendBytes);
+      // Send standard 40ms frame (320 bytes) at exact 1x real-time speed
+      const chunk = this.queue.subarray(0, this.chunkSize);
+      this.queue = this.queue.subarray(this.chunkSize);
       this._sendChunk(chunk);
       this._idleCount = 0;
-
-      // Telemetry (logged at most once every 3s during active high-queue streaming)
-      const now = performance.now();
-      if (this.queue.length > 800 && now - this._lastLogTime > 3000) {
-        const queueMs = Math.round((this.queue.length / 8000) * 1000);
-        console.log(
-          `[AudioStreamer:${this.label}] Queue depth: ${queueMs}ms (${this.queue.length}B) | sent: ${this._framesSent} frames`,
-        );
-        this._lastLogTime = now;
-      }
     } else if (this.queue.length > 0) {
-      // Partial chunk (< 320 bytes) waiting for next arrival
+      // Partial trailing frame (< 320 bytes).
+      // Keep partial bytes so next incoming audio chunk appends seamlessly.
       this._idleCount++;
-      // If no new audio arrives for 200ms (5 ticks), flush trailing partial frame with silence pad
+      // If no new audio arrives for 200ms (5 ticks), the utterance has finished;
+      // pad trailing bytes with silence and complete the stream.
       if (this._idleCount >= 5) {
         const padded = Buffer.alloc(this.chunkSize, 255); // 255 = standard μ-law silence
         this.queue.copy(padded);
@@ -165,4 +152,3 @@ class AudioStreamer {
 }
 
 module.exports = { AudioStreamer };
-

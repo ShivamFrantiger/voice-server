@@ -61,6 +61,8 @@ class ElevenLabsS2S {
 
     // VAD state
     this._speechBuffers    = []; // Array<Buffer> — accumulated μ-law chunks
+    this._preRollBuffers   = []; // Rolling ring buffer to preserve opening consonants/words
+    this._maxPreRollFrames = 4;  // 4 frames @ 20ms = 80ms lead-in
     this._isSpeaking       = false;
     this._speechStart      = 0;  // Date.now() when speech began
     this._silenceTimer     = null;
@@ -110,6 +112,7 @@ class ElevenLabsS2S {
     this._destroyed = true;
     this._clearTimers();
     this._speechBuffers = [];
+    this._preRollBuffers = [];
     this._orderedSegments = [];
     this._isSpeaking = false;
     const uptime = ((Date.now() - this._sessionStart) / 1000).toFixed(1);
@@ -131,12 +134,14 @@ class ElevenLabsS2S {
     if (!this._isSpeaking) {
       this._isSpeaking = true;
       this._speechStart = now;
-      this._speechBuffers = [];
-      console.log("[S2S] VAD: speech started");
+      // Prepend pre-roll lead-in frames so opening soft consonants are 100% preserved
+      this._speechBuffers = [...this._preRollBuffers, mulawBuffer];
+      this._preRollBuffers = [];
+      console.log(`[S2S] VAD: speech started (lead-in=${this._speechBuffers.length - 1} frames)`);
       try { this.onSpeechStart?.(); } catch (err) { console.error("[S2S] onSpeechStart error:", err.message); }
+    } else {
+      this._speechBuffers.push(mulawBuffer);
     }
-
-    this._speechBuffers.push(mulawBuffer);
 
     // Natural word-boundary detection for long utterances:
     // If continuous speech reaches maxSpeechMs, wait for an acoustic valley (rms < 250)
@@ -157,7 +162,14 @@ class ElevenLabsS2S {
   }
 
   _onSilenceChunk(mulawBuffer) {
-    if (!this._isSpeaking) return;
+    if (!this._isSpeaking) {
+      // Accumulate recent silence frames so when speech begins, opening syllables are intact
+      this._preRollBuffers.push(mulawBuffer);
+      if (this._preRollBuffers.length > this._maxPreRollFrames) {
+        this._preRollBuffers.shift();
+      }
+      return;
+    }
 
     // Hangover: keep accumulating for VAD_HANGOVER_FRAMES before treating as silence
     // Prevents cuts on soft consonants / word endings
@@ -181,6 +193,7 @@ class ElevenLabsS2S {
 
   _flush() {
     this._clearTimers();
+    this._preRollBuffers = [];
 
     if (!this._isSpeaking || this._speechBuffers.length === 0) return;
 
