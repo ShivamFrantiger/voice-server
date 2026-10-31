@@ -47,7 +47,8 @@ const { dialClient, hangupCall } = require("./plivoClient");
 const { createSarvamSTT } = require("./sarvamSTT");
 const { createSarvamTTS } = require("./sarvamTTS");
 const { ElevenLabsS2S }   = require("./elevenLabsS2S");
-const { mulawToPcm16k, pcm24kToMulaw, applyMulawNoiseGate } = require("./audioUtils");
+const { mulawToPcm16k, pcm24kToMulaw, applyMulawNoiseGate, computeMulawRms } = require("./audioUtils");
+const { fillerManager }   = require("./fillerManager");
 
 const PORT           = process.env.PORT || 8080;
 const MY_NUMBER      = process.env.MY_PHONE_NUMBER; // MY hardcoded number (trusted caller)
@@ -644,6 +645,10 @@ myWss.on("connection", (myWs, req) => {
             if (session.sttWs && session.sttWs.readyState === 1) {
               try {
                 const mulawBuf = Buffer.from(payload, "base64");
+                const rms = computeMulawRms(mulawBuf);
+                if (rms > SPEECH_THRESH && session.streamer) {
+                  fillerManager.onAgentSpeechStart(sessionId, session.streamer);
+                }
                 const pcmBuf   = mulawToPcm16k(mulawBuf);
                 session.sttWs.sendAudio(pcmBuf);
                 if (Math.random() < 0.05) {
@@ -725,6 +730,8 @@ clientWss.on("connection", (clientWs, req) => {
         const cur = sessions.get(sessionId);
         if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
 
+        fillerManager.onModulatedChunkReceived(sessionId);
+
         if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
           cur.streamer.ws = cur.clientWs;
         }
@@ -772,6 +779,8 @@ clientWss.on("connection", (clientWs, req) => {
         const cur = sessions.get(sessionId);
         if (!cur || !cur.clientWs || cur.clientWs.readyState !== 1) return;
 
+        fillerManager.onModulatedChunkReceived(sessionId);
+
         if (cur.streamer && cur.streamer.ws !== cur.clientWs) {
           cur.streamer.ws = cur.clientWs;
         }
@@ -791,6 +800,12 @@ clientWss.on("connection", (clientWs, req) => {
         stability:             STABILITY,
         removeBackgroundNoise: process.env.ELEVEN_LABS_REMOVE_NOISE === "true",
         modelId:               ELEVEN_MODEL,
+        onSpeechStart: () => {
+          const cur = sessions.get(sessionId);
+          if (cur?.streamer) {
+            fillerManager.onAgentSpeechStart(sessionId, cur.streamer);
+          }
+        },
       },
     );
     session.s2s = s2s;
@@ -814,6 +829,19 @@ clientWss.on("connection", (clientWs, req) => {
       if (!payload) return;
 
       // Client inbound audio → raw passthrough → MY phone (I hear client's real voice)
+      // Detect client speech to notify fillerManager and reset conversational turn
+      if (track === "inbound") {
+        const curSession = sessions.get(sessionId);
+        if (curSession) {
+          try {
+            const clientMulaw = Buffer.from(payload, "base64");
+            const clientRms = computeMulawRms(clientMulaw);
+            if (clientRms > 80) {
+              fillerManager.onClientSpeech(sessionId);
+            }
+          } catch (_) {}
+        }
+      }
       if (track === "inbound") {
         const cur = sessions.get(sessionId);
         if (cur?.myWs && cur.myWs.readyState === 1) {
@@ -847,6 +875,7 @@ clientWss.on("connection", (clientWs, req) => {
 // ─── Cleanup Helpers ──────────────────────────────────────────────────────────
 
 function cleanupSession(sessionId) {
+  if (sessionId) fillerManager.cleanup(sessionId);
   if (!sessionId) return;
   const session = sessions.get(sessionId);
   if (session) {
@@ -867,6 +896,7 @@ function cleanupSession(sessionId) {
 // ─── Start ───────────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
+  fillerManager.init();
   console.log("");
   console.log("╔══════════════════════════════════════════════════════════════╗");
   console.log("║     Voice Modulation Server (Dynamic Dual Engine)            ║");
@@ -877,6 +907,7 @@ server.listen(PORT, () => {
   console.log(`║   ElevenLabs Voice : ${(ELEVEN_VOICE?.slice(0, 24) || "not set").padEnd(39)} ║`);
   console.log(`║   Sarvam Speaker   : ${(SARVAM_SPEAKER?.slice(0, 24) || "not set").padEnd(39)} ║`);
   console.log(`║   My #             : ${(MY_NUMBER || "NOT SET").padEnd(39)} ║`);
+  console.log(`║   Guruji Fillers   : ${(fillerManager.enabled ? `Active (thresh=${fillerManager.thresholdMs}ms, count=${fillerManager.fillerKeys.length})` : "Disabled").padEnd(39)} ║`);
   console.log("╚══════════════════════════════════════════════════════════════╝");
   console.log("");
 });

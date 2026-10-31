@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "generate-fillers": "node generateFillers.js",
     "switch:eleven": "node switchEngine.js elevenlabs",
     "switch:sarvam": "node switchEngine.js sarvam",
     "engine:status": "node switchEngine.js status",

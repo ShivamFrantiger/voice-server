@@ -57,6 +57,7 @@ class ElevenLabsS2S {
     this.similarityBoost        = options.similarityBoost ?? 0.80;
     this.stability              = options.stability ?? 0.70;
     this.removeBackgroundNoise  = options.removeBackgroundNoise ?? (process.env.ELEVEN_LABS_REMOVE_NOISE === "true");
+    this.onSpeechStart          = options.onSpeechStart ?? null;
 
     // VAD state
     this._speechBuffers    = []; // Array<Buffer> — accumulated μ-law chunks
@@ -132,6 +133,7 @@ class ElevenLabsS2S {
       this._speechStart = now;
       this._speechBuffers = [];
       console.log("[S2S] VAD: speech started");
+      try { this.onSpeechStart?.(); } catch (err) { console.error("[S2S] onSpeechStart error:", err.message); }
     }
 
     this._speechBuffers.push(mulawBuffer);

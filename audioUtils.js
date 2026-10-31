@@ -156,4 +156,23 @@ function mulawToWav16k(mulawBuffer) {
   return Buffer.from(wav.toBuffer());
 }
 
-module.exports = { mulawToPcm16k, mulawToPcm16kRaw, pcm24kToMulaw, pcm8kToMulaw, mulawToWav16k, hasWavHeader, stripWavHeader, applyMulawNoiseGate };
+/**
+ * Compute RMS energy of a μ-law 8kHz buffer.
+ *
+ * @param {Buffer} mulawBuffer
+ * @returns {number} RMS value (0–32767)
+ */
+function computeMulawRms(mulawBuffer) {
+  if (!mulawBuffer || mulawBuffer.length === 0) return 0;
+  try {
+    const uint8 = new Uint8Array(mulawBuffer.buffer, mulawBuffer.byteOffset, mulawBuffer.byteLength);
+    const pcm = alawmulaw.mulaw.decode(uint8); // Int16Array
+    let sumSq = 0;
+    for (let i = 0; i < pcm.length; i++) sumSq += pcm[i] * pcm[i];
+    return Math.sqrt(sumSq / pcm.length);
+  } catch {
+    return 0;
+  }
+}
+
+module.exports = { mulawToPcm16k, mulawToPcm16kRaw, pcm24kToMulaw, pcm8kToMulaw, mulawToWav16k, hasWavHeader, stripWavHeader, applyMulawNoiseGate, computeMulawRms };
