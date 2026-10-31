@@ -13,7 +13,7 @@ class AudioStreamer {
     this.chunkSize = 320; // 40ms @ 8kHz μ-law (320 bytes)
     this.interval = 40; // 40ms send cadence
     const preMs = options.preBufferMs || 40;
-    this.preBuffer = Math.max(320, Math.round((cpreMs / 1000) * 8000));
+    this.preBuffer = Math.max(320, Math.round((preMs / 1000) * 8000));
     this._isStreaming = false;
     this._idleCount = 0;
   }
