@@ -52,13 +52,13 @@ class ElevenLabsS2S {
     this.onSpeechStart = options.onSpeechStart || null;
 
     // VAD config â€” tuned for telephone-quality audio & natural phrasing
-    this.silenceDurationMs      = options.silenceDurationMs ?? 180;
+    this.silenceDurationMs      = options.silenceDurationMs ?? 120;
     this.speechThreshold        = options.speechThreshold ?? 100;
     this.minSpeechMs            = options.minSpeechMs ?? 200;
-    this.maxSpeechMs            = options.maxSpeechMs ?? 1500;
+    this.maxSpeechMs            = options.maxSpeechMs ?? 800;
     this.modelId                = options.modelId ?? "eleven_multilingual_sts_v2";
-    this.latencyLevel           = options.latencyLevel ?? 3;
-    this.similarityBoost        = options.similarityBoost ?? 0.80;
+    this.latencyLevel           = options.latencyLevel ?? 4;
+    this.similarityBoost        = options.similarityBoost ?? 0.55;
     this.stability              = options.stability ?? 0.80;
     this.removeBackgroundNoise  = options.removeBackgroundNoise ?? (process.env.ELEVEN_LABS_REMOVE_NOISE === "true");
 
@@ -150,7 +150,7 @@ class ElevenLabsS2S {
     const elapsed = now - this._speechStart;
     if (elapsed >= this.maxSpeechMs) {
       const isWordBoundary = rms < 250;
-      const isHardLimit    = elapsed >= (this.maxSpeechMs + 800);
+      const isHardLimit    = elapsed >= (this.maxSpeechMs + 300);
 
       if (isWordBoundary || isHardLimit) {
         console.log(
