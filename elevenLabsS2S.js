@@ -52,14 +52,14 @@ class ElevenLabsS2S {
     this.onSpeechStart = options.onSpeechStart || null;
 
     // VAD config â€” tuned for telephone-quality audio & natural phrasing
-    this.silenceDurationMs      = options.silenceDurationMs ?? 260;
+    this.silenceDurationMs      = options.silenceDurationMs ?? 180;
     this.speechThreshold        = options.speechThreshold ?? 100;
-    this.minSpeechMs            = options.minSpeechMs ?? 120;
-    this.maxSpeechMs            = options.maxSpeechMs ?? 3500;
+    this.minSpeechMs            = options.minSpeechMs ?? 200;
+    this.maxSpeechMs            = options.maxSpeechMs ?? 1500;
     this.modelId                = options.modelId ?? "eleven_multilingual_sts_v2";
     this.latencyLevel           = options.latencyLevel ?? 3;
     this.similarityBoost        = options.similarityBoost ?? 0.80;
-    this.stability              = options.stability ?? 0.70;
+    this.stability              = options.stability ?? 0.80;
     this.removeBackgroundNoise  = options.removeBackgroundNoise ?? (process.env.ELEVEN_LABS_REMOVE_NOISE === "true");
 
     // VAD state

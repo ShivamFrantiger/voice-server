@@ -69,7 +69,7 @@ const ELEVEN_KEY = process.env.ELEVEN_LABS_API;
 const ELEVEN_VOICE = process.env.ELEVEN_LABS_VOICE_ID;
 const ELEVEN_MODEL =
   process.env.ELEVEN_LABS_MODEL || "eleven_multilingual_sts_v2";
-const SILENCE_MS = parseInt(process.env.ELEVEN_LABS_SILENCE_MS || "260", 10);
+const SILENCE_MS = parseInt(process.env.ELEVEN_LABS_SILENCE_MS || "180", 10);
 const SPEECH_THRESH = parseInt(
   process.env.ELEVEN_LABS_SPEECH_THRESHOLD || "100",
   10,
@@ -79,11 +79,11 @@ const NOISE_GATE = parseInt(
   10,
 );
 const MAX_SPEECH_MS = parseInt(
-  process.env.ELEVEN_LABS_MAX_SPEECH_MS || "3500",
+  process.env.ELEVEN_LABS_MAX_SPEECH_MS || "1500",
   10,
 );
 const MIN_SPEECH_MS = parseInt(
-  process.env.ELEVEN_LABS_MIN_SPEECH_MS || "120",
+  process.env.ELEVEN_LABS_MIN_SPEECH_MS || "200",
   10,
 );
 const LATENCY_LEVEL = parseInt(
@@ -93,9 +93,9 @@ const LATENCY_LEVEL = parseInt(
 const SIMILARITY_BOOST = parseFloat(
   process.env.ELEVEN_LABS_SIMILARITY_BOOST || "0.80",
 );
-const STABILITY = parseFloat(process.env.ELEVEN_LABS_STABILITY || "0.70");
+const STABILITY = parseFloat(process.env.ELEVEN_LABS_STABILITY || "0.80");
 const PREBUFFER_MS = parseInt(
-  process.env.AUDIO_STREAMER_PREBUFFER_MS || "160",
+  process.env.AUDIO_STREAMER_PREBUFFER_MS || "40",
   10,
 );
 
