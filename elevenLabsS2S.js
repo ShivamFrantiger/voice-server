@@ -285,7 +285,7 @@ class ElevenLabsS2S {
         stability: this.stability,
         similarity_boost: this.similarityBoost,
         style: 0,
-        use_speaker_boost: true,
+        use_speaker_boost: false, // [STABILITY S2] true causes per-segment pitch normalization artifacts on telephony audio
       }),
     );
     if (this.removeBackgroundNoise) {
