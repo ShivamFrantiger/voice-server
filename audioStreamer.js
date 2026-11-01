@@ -2,6 +2,12 @@
 //
 // Streams 8kHz μ-law audio at a steady, reliable cadence to Plivo's WebSocket.
 // Guarantees zero truncation of speech (no head-dropping or clipping).
+//
+// [FIX 2] Pre-buffer: 1 frame (320 bytes = 40ms) — already at minimum via AUDIO_STREAMER_PREBUFFER_MS=40
+// [FIX 3] Idle thresholds increased to prevent AudioStreamer stopping between consecutive
+//         ElevenLabs segments. At 120ms idle stop, a ~200ms inter-segment gap caused
+//         AudioStreamer to stop + restart, re-applying the pre-buffer delay every time.
+//         Now stops after 500ms empty (12 ticks) so consecutive segments flow uninterrupted.
 
 class AudioStreamer {
   constructor(ws, sessionId, label, options = {}) {
@@ -11,7 +17,7 @@ class AudioStreamer {
     this.queue = Buffer.alloc(0);
     this.timer = null;
     this.chunkSize = 320; // 40ms @ 8kHz μ-law (320 bytes)
-    this.interval = 40; // 40ms send cadence
+    this.interval = 40;  // 40ms send cadence
     const preMs = options.preBufferMs || 40;
     this.preBuffer = Math.max(320, Math.round((preMs / 1000) * 8000));
     this._isStreaming = false;
@@ -22,7 +28,7 @@ class AudioStreamer {
     if (!mulawBuffer || mulawBuffer.length === 0) return;
     this.queue = Buffer.concat([this.queue, mulawBuffer]);
 
-    // Start streaming once pre-buffer threshold is reached
+    // Start streaming once pre-buffer threshold is reached (1 frame = 320 bytes)
     if (!this._isStreaming && this.queue.length >= this.preBuffer) {
       this._startStreaming();
     }
@@ -42,22 +48,24 @@ class AudioStreamer {
         this._sendChunk(chunk);
         this._idleCount = 0;
       } else if (this.queue.length > 0) {
-        // Partial chunk in buffer (< 320 bytes).
-        // Keep partial bytes so next incoming audio chunk appends seamlessly.
+        // Partial chunk — wait up to 400ms (10 ticks) for more audio before padding+flushing.
+        // [FIX 3] Was 5 ticks (200ms). Increased so a natural inter-segment gap doesn't
+        //         trigger a premature flush of a partial final frame.
         this._idleCount++;
-        // If no new audio arrives for 200ms (5 ticks), the utterance has finished
-        if (this._idleCount >= 5) {
-          const padded = Buffer.alloc(this.chunkSize, 255); // 255 = standard μ-law silence
+        if (this._idleCount >= 10) {
+          const padded = Buffer.alloc(this.chunkSize, 255); // 255 = μ-law silence
           this.queue.copy(padded);
           this.queue = Buffer.alloc(0);
           this._sendChunk(padded);
           this._stopStreaming();
         }
       } else {
-        // Buffer is completely empty (0 bytes)
+        // Buffer is completely empty — wait up to 500ms (12 ticks) before sleeping.
+        // [FIX 3] Was 3 ticks (120ms). The old value caused AudioStreamer to stop between
+        //         consecutive ElevenLabs segments (~200-300ms apart), forcing a restart +
+        //         pre-buffer delay on every segment boundary. Now it stays alive across gaps.
         this._idleCount++;
-        // If queue remains empty for 3 ticks (120ms), sleep until next audio arrives
-        if (this._idleCount >= 3) {
+        if (this._idleCount >= 12) {
           this._stopStreaming();
         }
       }

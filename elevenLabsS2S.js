@@ -372,25 +372,31 @@ class ElevenLabsS2S {
 
   /**
    * Drains finished segments and flushes queued chunks for the next active segment.
+   *
+   * [FIX 3] Restructured to eliminate double-drain: old code drained nextSeg.bufferedChunks
+   * in an inner while(), then the outer while() re-entered for that segment (if also done)
+   * and flushed its already-empty bufferedChunks again. New code: drain ALL done segments
+   * first, then flush pre-buffered chunks from the new live head. Single pass, no redundancy.
    */
   _drainQueue() {
     if (this._destroyed) return;
 
+    // Step 1: drain all completed segments at the head of the queue, in strict order
     while (this._orderedSegments.length > 0 && this._orderedSegments[0].isDone) {
-      const finishedSeg = this._orderedSegments.shift();
-      // Flush any remaining buffered chunks
-      for (const chunk of finishedSeg.bufferedChunks) {
+      const done = this._orderedSegments.shift();
+      for (const chunk of done.bufferedChunks) {
         this.onAudioChunk(chunk);
       }
-      finishedSeg.bufferedChunks = [];
+      done.bufferedChunks = [];
+    }
 
-      // If there is a next segment waiting, flush all its pre-buffered chunks immediately
-      if (this._orderedSegments.length > 0) {
-        const nextSeg = this._orderedSegments[0];
-        while (nextSeg.bufferedChunks.length > 0) {
-          const chunk = nextSeg.bufferedChunks.shift();
-          this.onAudioChunk(chunk);
-        }
+    // Step 2: flush pre-buffered chunks from the new live head segment.
+    // These are chunks that arrived while a previous segment was playing.
+    // After this, _emitChunk routes new live chunks directly (head check passes).
+    if (this._orderedSegments.length > 0) {
+      const head = this._orderedSegments[0];
+      while (head.bufferedChunks.length > 0) {
+        this.onAudioChunk(head.bufferedChunks.shift());
       }
     }
   }
