@@ -49,6 +49,7 @@ class ElevenLabsS2S {
     this.apiKey = apiKey;
     this.voiceId = voiceId;
     this.onAudioChunk = onAudioChunk;
+    this.onSpeechStart = options.onSpeechStart || null;
 
     // VAD config â€” tuned for telephone-quality audio & natural phrasing
     this.silenceDurationMs      = options.silenceDurationMs ?? 260;
@@ -135,6 +136,9 @@ class ElevenLabsS2S {
       this._speechStart = now;
       this._speechBuffers = [];
       console.log("[S2S] VAD: speech started");
+      if (typeof this.onSpeechStart === "function") {
+        try { this.onSpeechStart(); } catch (err) { console.error("[S2S] onSpeechStart error:", err.message); }
+      }
     }
 
     this._speechBuffers.push(mulawBuffer);

@@ -34,41 +34,44 @@ class AudioStreamer {
     }
   }
 
+  _sendNextChunk() {
+    if (this.queue.length >= this.chunkSize) {
+      // Send exactly one 40ms frame (320 bytes)
+      const chunk = this.queue.subarray(0, this.chunkSize);
+      this.queue = this.queue.subarray(this.chunkSize);
+      this._sendChunk(chunk);
+      this._idleCount = 0;
+    } else if (this.queue.length > 0) {
+      // Partial chunk — wait up to 400ms (10 ticks) for more audio before padding+flushing.
+      this._idleCount++;
+      if (this._idleCount >= 10) {
+        const padded = Buffer.alloc(this.chunkSize, 255); // 255 = μ-law silence
+        this.queue.copy(padded);
+        this.queue = Buffer.alloc(0);
+        this._sendChunk(padded);
+        this._stopStreaming();
+      }
+    } else {
+      // Buffer is completely empty — wait up to 500ms (12 ticks) before sleeping.
+      this._idleCount++;
+      if (this._idleCount >= 12) {
+        this._stopStreaming();
+      }
+    }
+  }
+
   _startStreaming() {
     if (this._isStreaming) return;
     this._isStreaming = true;
     this._idleCount = 0;
 
+    // [FIX 7] Immediate first frame dispatch: sends frame 0 at t=0ms instead of waiting
+    // 40ms for the first setInterval tick. Shaves 40ms of latency off every utterance start!
+    this._sendNextChunk();
+
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
-      if (this.queue.length >= this.chunkSize) {
-        // Send exactly one 40ms frame (320 bytes)
-        const chunk = this.queue.subarray(0, this.chunkSize);
-        this.queue = this.queue.subarray(this.chunkSize);
-        this._sendChunk(chunk);
-        this._idleCount = 0;
-      } else if (this.queue.length > 0) {
-        // Partial chunk — wait up to 400ms (10 ticks) for more audio before padding+flushing.
-        // [FIX 3] Was 5 ticks (200ms). Increased so a natural inter-segment gap doesn't
-        //         trigger a premature flush of a partial final frame.
-        this._idleCount++;
-        if (this._idleCount >= 10) {
-          const padded = Buffer.alloc(this.chunkSize, 255); // 255 = μ-law silence
-          this.queue.copy(padded);
-          this.queue = Buffer.alloc(0);
-          this._sendChunk(padded);
-          this._stopStreaming();
-        }
-      } else {
-        // Buffer is completely empty — wait up to 500ms (12 ticks) before sleeping.
-        // [FIX 3] Was 3 ticks (120ms). The old value caused AudioStreamer to stop between
-        //         consecutive ElevenLabs segments (~200-300ms apart), forcing a restart +
-        //         pre-buffer delay on every segment boundary. Now it stays alive across gaps.
-        this._idleCount++;
-        if (this._idleCount >= 12) {
-          this._stopStreaming();
-        }
-      }
+      this._sendNextChunk();
     }, this.interval);
   }
 
