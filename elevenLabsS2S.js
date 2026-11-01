@@ -22,7 +22,10 @@ const { mulawToWav16k } = require("./audioUtils");
 const VAD_HANGOVER_FRAMES = 2;
 
 // Max concurrent ElevenLabs API requests (pipeline parallelism).
-const MAX_CONCURRENT = 2;
+// [FIX 5] Increased 2->4: if you speak 3 quick phrases, segment 3 no longer queues
+// behind segments 1+2 waiting for a slot. Ordered playback (_orderedSegments) still
+// guarantees correct output order — concurrency only affects API call parallelism.
+const MAX_CONCURRENT = 4;
 
 /**
  * ElevenLabsS2S â€” Low-Latency Speech-to-Speech with ordered segment streaming
